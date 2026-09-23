@@ -1,6 +1,7 @@
 #include "RyuboxFrontendHost.h"
 #include <windows.h>
 #include <algorithm>
+#include <fstream>
 #include <sstream>
 
 namespace
@@ -106,7 +107,17 @@ std::filesystem::path RyuboxFrontendHost::ResourceRoot() const
 
 std::filesystem::path RyuboxFrontendHost::StateRoot() const
 {
-    return L"";
+    wchar_t localAppData[MAX_PATH]{};
+    const DWORD length = GetEnvironmentVariableW(L"LOCALAPPDATA", localAppData, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH)
+        return {};
+    std::filesystem::path root(localAppData);
+    // Packaged processes already receive the package-local LocalState path.
+    // Desktop diagnostics use an isolated Ryubox directory as well.
+    root /= L"Ryubox";
+    std::error_code error;
+    std::filesystem::create_directories(root, error);
+    return error ? std::filesystem::path{} : root;
 }
 
 UwpImGuiFrontend::TextureHandle RyuboxFrontendHost::LoadTexture(const std::filesystem::path& path)
@@ -132,6 +143,16 @@ bool RyuboxFrontendHost::RequestLaunch(UwpImGuiFrontend::ItemId item)
 
 void RyuboxFrontendHost::OpenContextMenu(UwpImGuiFrontend::ItemId)
 {
+}
+
+bool RyuboxFrontendHost::ToggleFavorite(UwpImGuiFrontend::ItemId item)
+{
+    std::scoped_lock lock(m_mutex);
+    if (item == 0 || item > m_catalogue.size())
+        return false;
+    auto& selected = m_catalogue[static_cast<std::size_t>(item - 1)];
+    selected.favorite = !selected.favorite;
+    return true;
 }
 
 void RyuboxFrontendHost::Execute(UwpImGuiFrontend::HostCommand command)
@@ -162,11 +183,31 @@ void RyuboxFrontendHost::OpenUri(std::string_view)
 {
 }
 
-void RyuboxFrontendHost::PersistFrontendState(std::string_view)
+void RyuboxFrontendHost::PersistFrontendState(std::string_view data)
 {
+    const auto root = StateRoot();
+    if (root.empty()) return;
+    const auto target = root / L"frontend-state.json";
+    const auto temporary = root / L"frontend-state.tmp";
+    {
+        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
+        if (!stream) return;
+        stream.write(data.data(), static_cast<std::streamsize>(data.size()));
+        stream.flush();
+        if (!stream) return;
+    }
+    std::error_code error;
+    std::filesystem::remove(target, error);
+    error.clear();
+    std::filesystem::rename(temporary, target, error);
+    if (error) std::filesystem::remove(temporary, error);
 }
 
 std::string RyuboxFrontendHost::LoadFrontendState() const
 {
-    return "";
+    const auto root = StateRoot();
+    if (root.empty()) return {};
+    std::ifstream stream(root / L"frontend-state.json", std::ios::binary);
+    if (!stream) return {};
+    return { std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>() };
 }

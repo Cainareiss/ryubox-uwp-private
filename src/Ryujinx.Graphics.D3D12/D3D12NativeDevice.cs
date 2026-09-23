@@ -55,6 +55,7 @@ public struct D3D12PerformanceStats
     public ulong PsoMicroseconds, DescriptorBindMicroseconds, RecordMicroseconds;
     public ulong SubmitMicroseconds, PresentMicroseconds, FenceWaitMicroseconds;
     public ulong DepthAttachmentsDetached, InvalidRenderPasses, UavBarriers;
+    public ulong DescriptorTableCacheHits, DescriptorTableCacheMisses, DescriptorCopies;
 }
 
 /// <summary>
@@ -84,7 +85,7 @@ public sealed unsafe partial class D3D12NativeDevice : IDisposable
     {
         var stats = new D3D12PerformanceStats { Size = (uint)sizeof(D3D12PerformanceStats) };
         Check(GetPerformanceStatsNative(_handle, ref stats));
-        if (stats.Version != 1) throw new NotSupportedException($"Performance statistics ABI {stats.Version} is not supported.");
+        if (stats.Version != 2) throw new NotSupportedException($"Performance statistics ABI {stats.Version} is not supported.");
         return stats;
     }
     public string GetDiagnosticMessage()

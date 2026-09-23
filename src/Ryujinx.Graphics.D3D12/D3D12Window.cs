@@ -28,7 +28,7 @@ public sealed class D3D12Window : IWindow
         if (TracePresentation) try
         {
             string line = $"[Present] image={image.Width}x{image.Height} fmt={image.Info.Format} id={image.Native?.Id} crop=({crop.Left},{crop.Top},{crop.Right},{crop.Bottom})\n";
-            System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\draw_targets.txt", line);
+            System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "draw_targets.txt"), line);
         }
         catch {}
         _renderer.Device.Clear(null, 0, 0, 0, 1);
@@ -74,7 +74,7 @@ public sealed class D3D12Window : IWindow
         if (TracePresentation) Logger.Warning?.Print(Ryujinx.Common.Logging.LogClass.Gpu,
             $"[D3D12 Present DEBUG] image={image.Width}x{image.Height}, crop=({crop.Left},{crop.Top},{crop.Right},{crop.Bottom}), clamped=({left},{top},{right},{bottom}), flipY={crop.FlipY}, win={_width}x{_height}");
         if (TracePresentation)
-            try { System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\present_debug.txt", $"image={image.Width}x{image.Height}, crop=({crop.Left},{crop.Top},{crop.Right},{crop.Bottom}), clamped=({left},{top},{right},{bottom}), flipY={crop.FlipY}, win={_width}x{_height}\n"); } catch {}
+            try { System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "present_debug.txt"), $"image={image.Width}x{image.Height}, crop=({crop.Left},{crop.Top},{crop.Right},{crop.Bottom}), clamped=({left},{top},{right},{bottom}), flipY={crop.FlipY}, win={_width}x{_height}\n"); } catch {}
 
         float aspect = crop.AspectRatioX > 0 && crop.AspectRatioY > 0 ? crop.AspectRatioX / crop.AspectRatioY : (right - left) / (float)(bottom - top);
         float w = _width, h = _height;
@@ -110,11 +110,11 @@ public sealed class D3D12Window : IWindow
                     }
                 }
                 string logLine = $"[Present #{pIndex}] fmt={image.Info.Format}, w={image.Width}, h={image.Height}, colored={imgColored}/{span.Length / 64}, energy={imgEnergy}\n";
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\present_image_check.txt", logLine);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "present_image_check.txt"), logLine);
             }
             catch (Exception ex)
             {
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\present_image_check.txt",
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "present_image_check.txt"),
                     $"[Present #{pIndex}] Exception reading image: {ex.Message}\n");
             }
         }

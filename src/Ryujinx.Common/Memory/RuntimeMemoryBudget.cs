@@ -69,6 +69,8 @@ namespace Ryujinx.Common.Memory
         private static string _limitSource = "conservative-5GiB";
         private static MemoryBudgetSnapshot _lastSnapshot;
         private static long _lastCompilerTrimAt;
+        private static long _lastAdmissionSampleAt;
+        private static long _lastAdmissionUsage;
         private static int _trimActive;
         private static MemoryPressure _lastTrimPressure;
 
@@ -78,6 +80,41 @@ namespace Ryujinx.Common.Memory
         public static long Limit => Interlocked.Read(ref _limit);
         public static long ExpectedLimit => Interlocked.Read(ref _expectedLimit);
         public static MemoryBudgetSnapshot LastSnapshot => _lastSnapshot;
+
+        /// <summary>
+        /// Samples process usage without changing pressure state or invoking trim callbacks.
+        /// This is safe for admission checks that run while allocator locks are held.
+        /// </summary>
+        public static long GetEffectiveUsageNoTrim()
+        {
+            long now = Environment.TickCount64;
+            long sampledAt = Interlocked.Read(ref _lastAdmissionSampleAt);
+            long cached = Interlocked.Read(ref _lastAdmissionUsage);
+            if (cached > 0 && now - sampledAt < 100)
+            {
+                return Math.Max(cached, _lastSnapshot.EffectiveUsage);
+            }
+
+            long workingSet = Environment.WorkingSet;
+            long privateBytes = 0;
+            try
+            {
+                using Process process = Process.GetCurrentProcess();
+                process.Refresh();
+                privateBytes = process.PrivateMemorySize64;
+            }
+            catch
+            {
+                // Process information may be unavailable in older UWP sandboxes.
+            }
+
+            GCMemoryInfo gcInfo = GC.GetGCMemoryInfo();
+            long managedUsage = Math.Max(GC.GetTotalMemory(false), gcInfo.TotalCommittedBytes);
+            long usage = Math.Max(Math.Max(workingSet, privateBytes), managedUsage);
+            Interlocked.Exchange(ref _lastAdmissionUsage, usage);
+            Interlocked.Exchange(ref _lastAdmissionSampleAt, now);
+            return Math.Max(usage, _lastSnapshot.EffectiveUsage);
+        }
 
         public static void Configure(ulong appMemoryLimit, ulong expectedAppMemoryLimit = 0)
         {
@@ -104,6 +141,8 @@ namespace Ryujinx.Common.Memory
             Volatile.Write(ref _pressure, (int)MemoryPressure.Normal);
             _lastSnapshot = default;
             Interlocked.Exchange(ref _lastCompilerTrimAt, 0);
+            Interlocked.Exchange(ref _lastAdmissionSampleAt, 0);
+            Interlocked.Exchange(ref _lastAdmissionUsage, 0);
         }
 
         public static void Observe(MemoryCategory category, long bytes) =>

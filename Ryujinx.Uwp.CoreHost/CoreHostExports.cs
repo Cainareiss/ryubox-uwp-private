@@ -1921,6 +1921,8 @@ namespace Ryujinx.Uwp.CoreHost
             long descriptorSampleMilliseconds = intervalStartMilliseconds;
             D3D12DescriptorStats previousDescriptorStats = default;
             D3D12PerformanceStats previousPerformanceStats = default;
+            D3D12PerformanceStats startupPerformanceStats = default;
+            const long StartupDrawTraceLimit = 64;
 
             Switch initializedSwitch = _switch;
             long sessionId = ActiveSessionId;
@@ -1994,6 +1996,28 @@ namespace Ryujinx.Uwp.CoreHost
                         intervalProcessedFrames++;
 
                         long processFrameElapsed = Environment.TickCount64 - processFrameStart;
+                        if (presentedFrameCount == 0 &&
+                            _d3d12SessionRenderer is D3D12Renderer startupRenderer &&
+                            (frameNumber <= StartupDrawTraceLimit || processFrameElapsed >= 250))
+                        {
+                            // Keep this bounded to startup. It identifies whether a black
+                            // screen is spending its time compiling, binding, recording,
+                            // submitting, or waiting without forcing a fence/readback.
+                            D3D12PerformanceStats current = startupRenderer.Device.GetPerformanceStats();
+                            CoreHostLog.Write(
+                                "d3d12-first-frame",
+                                $"processed={frameNumber}; elapsedMs={processFrameElapsed}; " +
+                                $"drawsDelta={current.DrawCalls-startupPerformanceStats.DrawCalls}; passesDelta={current.RenderPasses-startupPerformanceStats.RenderPasses}; " +
+                                $"shaderHitDelta={current.ShaderCacheHits-startupPerformanceStats.ShaderCacheHits}; shaderMissDelta={current.ShaderCacheMisses-startupPerformanceStats.ShaderCacheMisses}; " +
+                                $"shaderCompileUsDelta={current.ShaderCompileMicroseconds-startupPerformanceStats.ShaderCompileMicroseconds}; " +
+                                $"psoHitDelta={current.PsoCacheHits-startupPerformanceStats.PsoCacheHits}; psoCreateDelta={current.PsoCreations-startupPerformanceStats.PsoCreations}; " +
+                                $"psoUsDelta={current.PsoMicroseconds-startupPerformanceStats.PsoMicroseconds}; descriptorUsDelta={current.DescriptorBindMicroseconds-startupPerformanceStats.DescriptorBindMicroseconds}; " +
+                                $"descriptorTableHitDelta={current.DescriptorTableCacheHits-startupPerformanceStats.DescriptorTableCacheHits}; descriptorTableMissDelta={current.DescriptorTableCacheMisses-startupPerformanceStats.DescriptorTableCacheMisses}; " +
+                                $"descriptorCopiesDelta={current.DescriptorCopies-startupPerformanceStats.DescriptorCopies}; " +
+                                $"recordUsDelta={current.RecordMicroseconds-startupPerformanceStats.RecordMicroseconds}; submitUsDelta={current.SubmitMicroseconds-startupPerformanceStats.SubmitMicroseconds}; " +
+                                $"waitUsDelta={current.FenceWaitMicroseconds-startupPerformanceStats.FenceWaitMicroseconds}; invalidPassDelta={current.InvalidRenderPasses-startupPerformanceStats.InvalidRenderPasses}");
+                            startupPerformanceStats = current;
+                        }
                         if (frameNumber <= 4 || processFrameElapsed >= 1000)
                         {
                             CoreHostLog.Write(
@@ -2110,6 +2134,9 @@ namespace Ryujinx.Uwp.CoreHost
                             CoreHostLog.Write("d3d12-descriptors",
                                 $"mode={(s.RingEnabled != 0 ? "ring" : "fixed")}; intervalMs={nowMilliseconds-descriptorSampleMilliseconds}; " +
                                 $"viewsDelta={s.ViewAllocations-previousDescriptorStats.ViewAllocations}; samplersDelta={s.SamplerAllocations-previousDescriptorStats.SamplerAllocations}; " +
+                                $"viewsPerDraw={Ratio(s.ViewAllocations-previousDescriptorStats.ViewAllocations, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
+                                $"samplersPerDraw={Ratio(s.SamplerAllocations-previousDescriptorStats.SamplerAllocations, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
+                                $"heapSwitchesPerDraw={Ratio(s.HeapSwitches-previousDescriptorStats.HeapSwitches, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
                                 $"occupied={s.ViewOccupied}/{s.SamplerOccupied}; peakOccupied={s.ViewPeakOccupied}/{s.SamplerPeakOccupied}; " +
                                 $"peakSubmission={s.ViewPeakPerSubmission}/{s.SamplerPeakPerSubmission}; pages={s.ViewPages}/{s.SamplerPages}; " +
                                 $"heapSwitchesDelta={s.HeapSwitches-previousDescriptorStats.HeapSwitches}; pressureDelta={s.PressureEvents-previousDescriptorStats.PressureEvents}; " +
@@ -2123,6 +2150,8 @@ namespace Ryujinx.Uwp.CoreHost
                                 $"psoHitDelta={p.PsoCacheHits-previousPerformanceStats.PsoCacheHits}; " +
                                 $"psoCreateDelta={p.PsoCreations-previousPerformanceStats.PsoCreations}; psoUsDelta={p.PsoMicroseconds-previousPerformanceStats.PsoMicroseconds}; " +
                                 $"descriptorUsDelta={p.DescriptorBindMicroseconds-previousPerformanceStats.DescriptorBindMicroseconds}; recordUsDelta={p.RecordMicroseconds-previousPerformanceStats.RecordMicroseconds}; " +
+                                $"descriptorTableHitDelta={p.DescriptorTableCacheHits-previousPerformanceStats.DescriptorTableCacheHits}; descriptorTableMissDelta={p.DescriptorTableCacheMisses-previousPerformanceStats.DescriptorTableCacheMisses}; " +
+                                $"descriptorCopiesDelta={p.DescriptorCopies-previousPerformanceStats.DescriptorCopies}; copiesPerDraw={Ratio(p.DescriptorCopies-previousPerformanceStats.DescriptorCopies, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
                                 $"submitUsDelta={p.SubmitMicroseconds-previousPerformanceStats.SubmitMicroseconds}; presentUsDelta={p.PresentMicroseconds-previousPerformanceStats.PresentMicroseconds}; " +
                                 $"waitUsDelta={p.FenceWaitMicroseconds-previousPerformanceStats.FenceWaitMicroseconds}; depthDetachedDelta={p.DepthAttachmentsDetached-previousPerformanceStats.DepthAttachmentsDetached}; " +
                                 $"invalidPassDelta={p.InvalidRenderPasses-previousPerformanceStats.InvalidRenderPasses}; uavBarriersDelta={p.UavBarriers-previousPerformanceStats.UavBarriers}");
@@ -2143,6 +2172,9 @@ namespace Ryujinx.Uwp.CoreHost
                 Thread.Yield();
             }
         }
+
+        private static string Ratio(ulong numerator, ulong denominator) =>
+            denominator == 0 ? "0.000" : ((double)numerator / denominator).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
 
         private static int ToStickValue(float value)
         {
