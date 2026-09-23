@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <InvariantGlobalization>false</InvariantGlobalization>
+    <StripSymbols>false</StripSymbols>
+    <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Desktop Avalonia configuration bridge is not part of the NativeAOT UWP host. -->
+    <Compile Remove="RyuboxSettingsBridge.cs" />
+    <TrimmerRootDescriptor Include="NativeAotRoots.rd.xml" />
+    <ProjectReference Include="..\src\Ryujinx.HLE\Ryujinx.HLE.csproj" />
+    <ProjectReference Include="..\src\Ryujinx.Graphics.Vulkan\Ryujinx.Graphics.Vulkan.csproj" />
+    <ProjectReference Include="..\src\Ryujinx.Graphics.D3D11\Ryujinx.Graphics.D3D11.csproj" />
+    <ProjectReference Include="..\src\Ryujinx.Graphics.D3D12\Ryujinx.Graphics.D3D12.csproj" />
+    <ProjectReference Include="..\src\Ryujinx.Common\Ryujinx.Common.csproj" />
+  </ItemGroup>
+</Project>

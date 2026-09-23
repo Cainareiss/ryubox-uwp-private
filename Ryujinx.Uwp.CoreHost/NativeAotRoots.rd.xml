@@ -1,0 +1,26 @@
+<Directives xmlns="http://schemas.microsoft.com/netfx/2013/01/metadata">
+  <Application>
+    <Assembly Name="Ryujinx.HLE" Dynamic="Required All">
+      <Type Name="*" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Services.IpcService" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Services.Sm.IUserInterface" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Services.CommandCmifAttribute" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Services.CommandTipcAttribute" Dynamic="Required All" />
+      <Type Name="Ryujinx.HLE.HOS.Services.ServiceAttribute" Dynamic="Required All" />
+    </Assembly>
+    <Assembly Name="Ryujinx.Horizon" Dynamic="Required All">
+      <Type Name="*" Dynamic="Required All" />
+    </Assembly>
+    <Assembly Name="Ryujinx.Audio" Dynamic="Required All">
+      <Type Name="*" Dynamic="Required All" />
+    </Assembly>
+    <!-- ARMeilleure emits calls to helper methods by resolving MethodInfo
+         function pointers at translation time. NativeAOT must generate both
+         metadata and native bodies for every possible instruction helper;
+         preserving only the first observed method causes a fail-fast as soon
+         as guest ARM execution begins. -->
+    <Assembly Name="ARMeilleure" Dynamic="Required All">
+      <Type Name="*" Dynamic="Required All" />
+    </Assembly>
+  </Application>
+</Directives>
