@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{F6E63F8D-8E75-4D52-9A31-5A0C8B50C6B4}</ProjectGuid>
+    <RootNamespace>Ryujinx.Uwp.Native</RootNamespace>
+    <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>
+    <WindowsTargetPlatformMinVersion>10.0.17763.0</WindowsTargetPlatformMinVersion>
+    <VcpkgEnabled>false</VcpkgEnabled>
+    <VcpkgEnableManifest>false</VcpkgEnableManifest>
+    <VcpkgManifestInstall>false</VcpkgManifestInstall>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <LanguageStandard>stdcpp20</LanguageStandard>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <LanguageStandard>stdcpp20</LanguageStandard>
+  </PropertyGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+
+  <PropertyGroup>
+    <OutDir>$(MSBuildThisFileDirectory)bin\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(MSBuildThisFileDirectory)obj\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>Ryujinx.Uwp.Native</TargetName>
+    <EnableModules>false</EnableModules>
+  </PropertyGroup>
+
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <PreprocessorDefinitions>WIN32;_WINDOWS;WINAPI_FAMILY=WINAPI_FAMILY_APP;NOMINMAX;FMT_HEADER_ONLY;RAPIDJSON_HAS_STDSTRING=1;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>shims;shims\rapidjson-repo\include;shims\fmt-repo\include;..\UWP-ImGuiFrontend\include;third_party\imgui;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp20</LanguageStandard>
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <AdditionalOptions>/utf-8 /FS %(AdditionalOptions)</AdditionalOptions>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Debug'">MultiThreadedDebug</RuntimeLibrary>
+      <RuntimeLibrary Condition="'$(Configuration)'=='Release'">MultiThreaded</RuntimeLibrary>
+    </ClCompile>
+    <Link>
+      <SubSystem>Windows</SubSystem>
+      <AdditionalDependencies>d3d11.lib;d3d12.lib;d3dcompiler.lib;dxgi.lib;dxguid.lib;xaudio2.lib;windowsapp.lib;%(AdditionalDependencies)</AdditionalDependencies>
+    </Link>
+  </ItemDefinitionGroup>
+
+  <ItemGroup>
+    <ClCompile Include="Ryujinx.Uwp.Native.cpp" />
+    <ClCompile Include="D3D12Backend.cpp" />
+    <ClCompile Include="ImGuiD3D11Shell.cpp" />
+    <ClCompile Include="ImGuiD3D12Renderer.cpp" />
+    <ClCompile Include="D3D12FrontendHost.cpp" />
+    <ClCompile Include="RyuboxFrontendHost.cpp" />
+    <ClCompile Include="third_party\imgui\imgui.cpp" />
+    <ClCompile Include="third_party\imgui\imgui_draw.cpp" />
+    <ClCompile Include="third_party\imgui\imgui_tables.cpp" />
+    <ClCompile Include="third_party\imgui\imgui_widgets.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\ControllerProfileStore.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\CredentialStore.cpp" />
+    <ClCompile Include="DsuCompanionStub.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\Frontend.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\GraphicsView.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\ImGuiShell.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\InputMapper.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\InputMapping.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\LibraryView.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\MetadataEditor.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\NativeTextInput.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\Notifications.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\Pickers.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\RyuboxSettings.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\ScreenScraperService.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\ScreenScraperTypes.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\ServicePanels.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\Settings.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\ShellRenderer.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\ShellState.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\StorageLocations.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\Text.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\Types.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\Views.cpp" />
+    <ClCompile Include="..\UWP-ImGuiFrontend\src\Widgets.cpp" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ClInclude Include="ImGuiD3D11Shell.h" />
+    <ClInclude Include="D3D12Backend.h" />
+    <ClInclude Include="D3D12Program.h" />
+    <ClInclude Include="D3D12Program.inl" />
+    <ClInclude Include="D3D12Gal.inl" />
+    <ClInclude Include="RyuboxFrontendHost.h" />
+    <ClInclude Include="third_party\imgui\imgui.h" />
+    <ClInclude Include="third_party\imgui\imgui_internal.h" />
+    <ClInclude Include="third_party\imgui\imconfig.h" />
+    <ClInclude Include="third_party\imgui\imstb_rectpack.h" />
+    <ClInclude Include="third_party\imgui\imstb_textedit.h" />
+    <ClInclude Include="third_party\imgui\imstb_truetype.h" />
+  </ItemGroup>
+
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>
+
+

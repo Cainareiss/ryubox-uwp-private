@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:mp="http://schemas.microsoft.com/appx/2014/phone/manifest"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap mp rescap">
+
+  <Identity
+    Name="Ryujinx.Xbox.UWP"
+    Publisher="CN=Ryujinx Xbox Dev"
+    Version="0.2.0.127" />
+
+  <mp:PhoneIdentity
+    PhoneProductId="d2e4e7aa-7d52-46d7-94fb-bb6ba99f9f58"
+    PhonePublisherId="00000000-0000-0000-0000-000000000000" />
+
+  <Properties>
+    <DisplayName>Ryubox Eden</DisplayName>
+    <PublisherDisplayName>Ryujinx Xbox Dev</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Universal" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+    <TargetDeviceFamily Name="Windows.Xbox" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+    <PackageDependency Name="Microsoft.VCLibs.140.00" MinVersion="14.0.33519.0" Publisher="CN=Microsoft Corporation, O=Microsoft Corporation, L=Redmond, S=Washington, C=US" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="x-generate" />
+  </Resources>
+
+  <Applications>
+    <Application Id="App" Executable="$targetnametoken$.exe" EntryPoint="Ryujinx.Uwp.App.App">
+      <uap:VisualElements
+        DisplayName="Ryubox Eden"
+        Description="Ryubox Eden para Xbox Dev Mode - D3D11 nativo, áudio e controle"
+        BackgroundColor="#0C2232"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile Wide310x150Logo="Assets\Wide310x150Logo.png" />
+        <uap:SplashScreen Image="Assets\SplashScreen.png" BackgroundColor="#0C2232" />
+      </uap:VisualElements>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- The NativeAOT emulator core consumes game containers through direct
+         file handles after the user grants the library folder in the picker. -->
+    <rescap:Capability Name="broadFileSystemAccess" />
+    <!-- Permit Storage APIs to enumerate an Xbox-attached USB drive after
+         the user grants the selected folder through the picker. -->
+    <uap:Capability Name="removableStorage" />
+    <!-- ARMeilleure emits executable x64 code at runtime.  Xbox UWP must opt
+         into dynamic code generation instead of relying on desktop defaults. -->
+    <Capability Name="codeGeneration" />
+    <!-- Request the Xbox Dev Mode resource class used by native emulators.
+         The runtime memory watchdog still enforces the 5 GiB safety budget. -->
+    <rescap:Capability Name="expandedResources" />
+  </Capabilities>
+</Package>
