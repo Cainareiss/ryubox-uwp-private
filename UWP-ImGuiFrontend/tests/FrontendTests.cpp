@@ -149,6 +149,11 @@ public:
 		return launchAccepted;
 	}
 	void OpenContextMenu(ItemId item) override { contextItem = item; }
+	bool ToggleFavorite(ItemId item) override
+	{
+		favoriteItem = item;
+		return favoriteAccepted;
+	}
 	void Execute(HostCommand command) override { commands.push_back(command); }
 	void DrawSettingsPage(std::string_view) override {}
 	void OpenUri(std::string_view) override {}
@@ -164,6 +169,8 @@ public:
 	std::size_t videoStopCount = 0;
 	ItemId launched = 0;
 	ItemId contextItem = 0;
+	ItemId favoriteItem = 0;
+	bool favoriteAccepted = true;
 	bool launchAccepted = true;
 };
 
@@ -475,14 +482,20 @@ void TestReusableViewState()
 	Check(table.selected == 0);
 
 	const auto titleActions = MakeDefaultTitleOptionActions(true);
-	Check(titleActions.size() == 4);
+	Check(titleActions.size() == 10);
 	Check(titleActions[0].id == "start" && titleActions[0].label == "Start");
 	Check(titleActions[1].id == "favorite" && titleActions[1].checkable &&
 		titleActions[1].checked);
-	Check(titleActions[2].id == "metadata" &&
-		titleActions[2].label == "Edit Metadata");
-	Check(titleActions[3].id == "controller-mapping" &&
-		titleActions[3].label == "Controller Mapping");
+	Check(titleActions[2].id == "custom-cover");
+	Check(titleActions[3].id == "cheats");
+	Check(titleActions[4].id == "updates");
+	Check(titleActions[5].id == "mods");
+	Check(titleActions[6].id == "resolution");
+	Check(titleActions[7].id == "console-mode");
+	Check(titleActions[8].id == "metadata" &&
+		titleActions[8].label == "Edit Metadata");
+	Check(titleActions[9].id == "controller-mapping" &&
+		titleActions[9].label == "Controller Mapping");
 }
 
 void TestNotificationCenter()
@@ -1010,9 +1023,17 @@ void TestFrontendNavigationAndCompanionLaunch()
 	frontend.HandleInput(input);
 	Check(frontend.State().SelectedIndex() == 15);
 	host.contextItem = 0;
+	input.alternate = true;
+	frontend.HandleInput(input);
+	Check(frontend.ContextItem() && frontend.ContextItem()->id == 16);
+	input.alternate = false;
+	frontend.HandleInput(input);
+	frontend.CloseContextMenu();
+	host.favoriteItem = 0;
 	input.context = true;
 	frontend.HandleInput(input);
-	Check(host.contextItem == 16);
+	Check(host.favoriteItem == 16);
+	Check(frontend.Catalogue()[15].favorite);
 	input.context = false;
 	frontend.HandleInput(input);
 	frontend.Select(5);
@@ -1021,10 +1042,10 @@ void TestFrontendNavigationAndCompanionLaunch()
 	input.left = false;
 	frontend.HandleInput(input);
 	host.contextItem = 0;
-	input.context = true;
+	input.alternate = true;
 	frontend.HandleInput(input);
-	Check(host.contextItem == 0);
-	input.context = false;
+	Check(frontend.ContextItem() == nullptr);
+	input.alternate = false;
 	frontend.HandleInput(input);
 	companion.pendingLaunch = 3;
 	frontend.HandleInput(input);
@@ -1604,6 +1625,7 @@ void TestSetupWizardAndModalOwnership()
 	Check(wizard.State().progress == 0.75f);
 	wizard.CompleteOperation(true, "Keys installed");
 	Check(!wizard.Popups().IsOpen());
+	Check(wizard.State().requestClosePopup);
 	Check(wizard.Popups().RequestFocusRestore());
 	Check(wizard.ConsumeFocusRestore());
 	wizard.Tick(1.1f);

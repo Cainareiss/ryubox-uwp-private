@@ -76,6 +76,11 @@ struct LibraryItem
 	std::string platform;
 	std::string region;
 	std::string format;
+	std::string consoleMode = "Docked";
+	float resolutionScale = 1.0f;
+	bool favorite = false;
+	bool updateActive = false;
+	bool modsActive = false;
 	std::filesystem::path launchPath;
 	std::filesystem::path metadataPath;
 	Metadata metadata;
