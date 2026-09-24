@@ -2003,20 +2003,20 @@ namespace Ryujinx.Uwp.CoreHost
                             // Keep this bounded to startup. It identifies whether a black
                             // screen is spending its time compiling, binding, recording,
                             // submitting, or waiting without forcing a fence/readback.
-                            D3D12PerformanceStats current = startupRenderer.Device.GetPerformanceStats();
+                            D3D12PerformanceStats startupStats = startupRenderer.Device.GetPerformanceStats();
                             CoreHostLog.Write(
                                 "d3d12-first-frame",
                                 $"processed={frameNumber}; elapsedMs={processFrameElapsed}; " +
-                                $"drawsDelta={current.DrawCalls-startupPerformanceStats.DrawCalls}; passesDelta={current.RenderPasses-startupPerformanceStats.RenderPasses}; " +
-                                $"shaderHitDelta={current.ShaderCacheHits-startupPerformanceStats.ShaderCacheHits}; shaderMissDelta={current.ShaderCacheMisses-startupPerformanceStats.ShaderCacheMisses}; " +
-                                $"shaderCompileUsDelta={current.ShaderCompileMicroseconds-startupPerformanceStats.ShaderCompileMicroseconds}; " +
-                                $"psoHitDelta={current.PsoCacheHits-startupPerformanceStats.PsoCacheHits}; psoCreateDelta={current.PsoCreations-startupPerformanceStats.PsoCreations}; " +
-                                $"psoUsDelta={current.PsoMicroseconds-startupPerformanceStats.PsoMicroseconds}; descriptorUsDelta={current.DescriptorBindMicroseconds-startupPerformanceStats.DescriptorBindMicroseconds}; " +
-                                $"descriptorTableHitDelta={current.DescriptorTableCacheHits-startupPerformanceStats.DescriptorTableCacheHits}; descriptorTableMissDelta={current.DescriptorTableCacheMisses-startupPerformanceStats.DescriptorTableCacheMisses}; " +
-                                $"descriptorCopiesDelta={current.DescriptorCopies-startupPerformanceStats.DescriptorCopies}; " +
-                                $"recordUsDelta={current.RecordMicroseconds-startupPerformanceStats.RecordMicroseconds}; submitUsDelta={current.SubmitMicroseconds-startupPerformanceStats.SubmitMicroseconds}; " +
-                                $"waitUsDelta={current.FenceWaitMicroseconds-startupPerformanceStats.FenceWaitMicroseconds}; invalidPassDelta={current.InvalidRenderPasses-startupPerformanceStats.InvalidRenderPasses}");
-                            startupPerformanceStats = current;
+                                $"drawsDelta={startupStats.DrawCalls-startupPerformanceStats.DrawCalls}; passesDelta={startupStats.RenderPasses-startupPerformanceStats.RenderPasses}; " +
+                                $"shaderHitDelta={startupStats.ShaderCacheHits-startupPerformanceStats.ShaderCacheHits}; shaderMissDelta={startupStats.ShaderCacheMisses-startupPerformanceStats.ShaderCacheMisses}; " +
+                                $"shaderCompileUsDelta={startupStats.ShaderCompileMicroseconds-startupPerformanceStats.ShaderCompileMicroseconds}; " +
+                                $"psoHitDelta={startupStats.PsoCacheHits-startupPerformanceStats.PsoCacheHits}; psoCreateDelta={startupStats.PsoCreations-startupPerformanceStats.PsoCreations}; " +
+                                $"psoUsDelta={startupStats.PsoMicroseconds-startupPerformanceStats.PsoMicroseconds}; descriptorUsDelta={startupStats.DescriptorBindMicroseconds-startupPerformanceStats.DescriptorBindMicroseconds}; " +
+                                $"descriptorTableHitDelta={startupStats.DescriptorTableCacheHits-startupPerformanceStats.DescriptorTableCacheHits}; descriptorTableMissDelta={startupStats.DescriptorTableCacheMisses-startupPerformanceStats.DescriptorTableCacheMisses}; " +
+                                $"descriptorCopiesDelta={startupStats.DescriptorCopies-startupPerformanceStats.DescriptorCopies}; " +
+                                $"recordUsDelta={startupStats.RecordMicroseconds-startupPerformanceStats.RecordMicroseconds}; submitUsDelta={startupStats.SubmitMicroseconds-startupPerformanceStats.SubmitMicroseconds}; " +
+                                $"waitUsDelta={startupStats.FenceWaitMicroseconds-startupPerformanceStats.FenceWaitMicroseconds}; invalidPassDelta={startupStats.InvalidRenderPasses-startupPerformanceStats.InvalidRenderPasses}");
+                            startupPerformanceStats = startupStats;
                         }
                         if (frameNumber <= 4 || processFrameElapsed >= 1000)
                         {
