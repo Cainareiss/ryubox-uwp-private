@@ -175,7 +175,7 @@ public sealed class D3D12GalTexture : ITexture
             try
             {
                 string line = $"[CopyTo Subresource] src={Width}x{Height} fmt={_info.Format} id={Native?.Id} (L{srcLayer},M{srcLevel}) -> dst={target.Width}x{target.Height} fmt={target._info.Format} id={target.Native?.Id} (L{dstLayer},M{dstLevel})\n";
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\draw_targets.txt", line);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "draw_targets.txt"), line);
             }
             catch {}
         }
@@ -212,7 +212,7 @@ public sealed class D3D12GalTexture : ITexture
             try
             {
                 string line = $"[CopyTo Extents] src={Width}x{Height} fmt={_info.Format} id={Native?.Id} ({source.X1},{source.Y1}-{source.X2},{source.Y2}) -> dst={texture.Width}x{texture.Height} fmt={texture._info.Format} id={texture.Native?.Id} ({target.X1},{target.Y1}-{target.X2},{target.Y2})\n";
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\draw_targets.txt", line);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "draw_targets.txt"), line);
             }
             catch {}
         }

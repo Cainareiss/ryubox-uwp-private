@@ -88,6 +88,10 @@ public:
 	void HandleInput(const FrameInput& input);
 	void ActivateSelection();
 	void OpenContextMenu();
+	void ToggleFavorite();
+	void CloseContextMenu() noexcept { m_contextItem.reset(); }
+	[[nodiscard]] const LibraryItem* ContextItem() const noexcept;
+	void ActivateContextAction(std::string_view action);
 	void Select(std::size_t index) noexcept;
 	void ActivateAction(ShellFocusArea area, std::size_t index);
 	void PushNotification(Notification notification);
@@ -141,6 +145,7 @@ private:
 	float m_leftHeldSeconds = 0.0f;
 	float m_rightHeldSeconds = 0.0f;
 	std::optional<ItemId> m_pendingLaunch;
+	std::optional<ItemId> m_contextItem;
 	bool m_initialized = false;
 };
 }

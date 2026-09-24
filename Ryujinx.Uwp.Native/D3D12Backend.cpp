@@ -457,6 +457,15 @@ struct Frame
         ID3D12DescriptorHeap* heap = nullptr;
         UINT offset = 0;
     };
+    struct BindingGroup
+    {
+        UINT64 hash = 0;
+        ID3D12RootSignature* root = nullptr;
+        std::vector<RyuboxD12Binding> bindings;
+        ID3D12DescriptorHeap* viewHeap = nullptr;
+        ID3D12DescriptorHeap* samplerHeap = nullptr;
+        std::vector<D3D12_GPU_DESCRIPTOR_HANDLE> gpuStarts;
+    };
     ComPtr<ID3D12CommandAllocator> allocator;
     UINT64 fence = 0;
     UINT64 descriptorCount = 0;
@@ -475,6 +484,8 @@ struct Frame
     // fence completes, so cached shader-visible sampler ranges remain valid
     // without extending descriptor retirement or copying unchanged samplers.
     std::vector<SamplerGroup> samplerGroups;
+    std::vector<BindingGroup> bindingGroups;
+    std::unordered_multimap<UINT64, size_t> bindingGroupLookup;
     std::unordered_set<ID3D12PipelineState*> retainedPipelines;
     std::unordered_set<ID3D12RootSignature*> retainedRoots;
 };
@@ -484,6 +495,21 @@ struct ProgramBinding
     RyuboxD12BindingInfo info;
     D3D_SHADER_INPUT_TYPE inputType;
     UINT table, tableOffset;
+};
+struct BindingKey
+{
+    UINT stage, type, space, binding;
+    bool operator==(const BindingKey&) const = default;
+};
+struct BindingKeyHash
+{
+    size_t operator()(const BindingKey& key) const noexcept
+    {
+        size_t hash = key.stage;
+        hash = hash * 16777619u ^ key.type;
+        hash = hash * 16777619u ^ key.space;
+        return hash * 16777619u ^ key.binding;
+    }
 };
 struct Program
 {
@@ -501,6 +527,7 @@ struct Program
     std::vector<RyuboxD12VertexInput> inputs;
     std::vector<RyuboxD12SOElement> streamOutputs;
     std::vector<std::pair<UINT, UINT>> tables; // stage, sampler/non-sampler
+    std::vector<UINT> tableSizes;
     std::map<std::string, ComPtr<ID3D12PipelineState>> graphics;
 };
 
@@ -547,7 +574,7 @@ public:
     };
     DescriptorPool viewPool, samplerPool;
     RyuboxD3D12DescriptorStats descriptorStats{};
-    RyuboxD3D12PerformanceStats performanceStats{sizeof(RyuboxD3D12PerformanceStats), 1};
+    RyuboxD3D12PerformanceStats performanceStats{sizeof(RyuboxD3D12PerformanceStats), 2};
     bool descriptorRingEnabled = true;
     ID3D12DescriptorHeap* boundViewHeap = nullptr;
     ID3D12DescriptorHeap* boundSamplerHeap = nullptr;
@@ -1172,6 +1199,8 @@ public:
         frame.retainedRoots.clear();
         frame.samplerCount = 0;
         frame.samplerGroups.clear();
+        frame.bindingGroups.clear();
+        frame.bindingGroupLookup.clear();
         frame.rtvCount = 0;
         frame.dsvCount = 0;
         frame.roots.clear();

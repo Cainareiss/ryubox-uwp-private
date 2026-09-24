@@ -247,12 +247,13 @@ namespace ARMeilleure.Translation.Cache
             // Admission accounts for a full future region, although commitment
             // remains lazy, and leaves headroom for the guest/GPU/compiler.
             var budget = RuntimeMemoryBudget.LastSnapshot;
+            long effectiveUsage = Math.Max(budget.EffectiveUsage, RuntimeMemoryBudget.GetEffectiveUsageNoTrim());
             if (_jitRegions.Count >= DefaultMaxRegions &&
-                !CanGrowWithinBudget(budget.EffectiveUsage, RuntimeMemoryBudget.Limit))
+                !CanGrowWithinBudget(effectiveUsage, RuntimeMemoryBudget.Limit))
             {
                 _allocationFailures++;
                 throw new JitCacheFullException(
-                    $"JIT cache growth denied by process budget: usage={budget.EffectiveUsage}, " +
+                    $"JIT cache growth denied by process budget: usage={effectiveUsage}, " +
                     $"limit={RuntimeMemoryBudget.Limit}, regions={_jitRegions.Count}.");
             }
 
@@ -287,13 +288,14 @@ namespace ARMeilleure.Translation.Cache
                 ulong desiredSize = (ulong)(offset % (int)CacheSize) + (ulong)size;
                 int additionalCommit = checked((int)region.GetAdditionalCommitSize(desiredSize));
                 var budget = RuntimeMemoryBudget.LastSnapshot;
+                long effectiveUsage = Math.Max(budget.EffectiveUsage, RuntimeMemoryBudget.GetEffectiveUsageNoTrim());
                 // Reusing retired code does not consume commit. Charging its
                 // size again makes eviction recovery fail under pressure.
-                if (additionalCommit > 0 && budget.EffectiveUsage > 0 && RuntimeMemoryBudget.Limit > 0 &&
-                    !CanCommitWithinBudget(budget.EffectiveUsage, RuntimeMemoryBudget.Limit, additionalCommit))
+                if (additionalCommit > 0 && effectiveUsage > 0 && RuntimeMemoryBudget.Limit > 0 &&
+                    !CanCommitWithinBudget(effectiveUsage, RuntimeMemoryBudget.Limit, additionalCommit))
                 {
                     throw new JitCacheFullException(
-                        $"JIT code-page commit denied by process budget: usage={budget.EffectiveUsage}, " +
+                        $"JIT code-page commit denied by process budget: usage={effectiveUsage}, " +
                         $"limit={RuntimeMemoryBudget.Limit}, requested={size}, additionalCommit={additionalCommit}, regions={_jitRegions.Count}.");
                 }
 
