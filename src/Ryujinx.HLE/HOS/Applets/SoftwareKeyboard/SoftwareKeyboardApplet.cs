@@ -58,7 +58,7 @@ namespace Ryujinx.HLE.HOS.Applets
         private KeyboardResult _lastResult = KeyboardResult.NotSet;
 
         private IDynamicTextInputHandler _dynamicTextInputHandler = null;
-        private SoftwareKeyboardRenderer _keyboardRenderer = null;
+        private ISoftwareKeyboardRenderer _keyboardRenderer = null;
         private NpadReader _npads = null;
         private bool _canAcceptController = false;
         private KeyboardInputMode _inputMode = KeyboardInputMode.ControllerAndKeyboard;
@@ -108,7 +108,19 @@ namespace Ryujinx.HLE.HOS.Applets
                         _npads.NpadButtonDownEvent += HandleNpadButtonDownEvent;
                         _npads.NpadButtonUpEvent += HandleNpadButtonUpEvent;
 
-                        _keyboardRenderer = new SoftwareKeyboardRenderer(_device.UIHandler.HostUITheme);
+                        try
+                        {
+                            _keyboardRenderer = new SoftwareKeyboardRenderer(_device.UIHandler.HostUITheme);
+                        }
+                        catch (Exception exception)
+                        {
+                            // Inline text input remains usable with a dependency-free
+                            // panel. A missing native SkiaSharp dependency must not
+                            // escape the applet service thread and terminate CoreHost.
+                            Logger.Error?.Print(LogClass.ServiceAm,
+                                $"Software keyboard graphics are unavailable; using the text-input fallback. {exception}");
+                            _keyboardRenderer = new SoftwareKeyboardFallbackRenderer();
+                        }
                     }
 
                     return ResultCode.Success;
@@ -459,7 +471,7 @@ namespace Ryujinx.HLE.HOS.Applets
                     if (updateText)
                     {
                         _dynamicTextInputHandler.SetText(_textValue, _cursorBegin);
-                        _keyboardRenderer.UpdateTextState(_textValue, _cursorBegin, _cursorBegin, null, null);
+                        _keyboardRenderer?.UpdateTextState(_textValue, _cursorBegin, _cursorBegin, null, null);
                     }
 
                     if ((newCalc.Flags & KeyboardCalcFlags.MustShow) != 0)
@@ -504,8 +516,8 @@ namespace Ryujinx.HLE.HOS.Applets
 
             _dynamicTextInputHandler.TextProcessingEnabled = true;
 
-            _keyboardRenderer.UpdateCommandState(null, null, true);
-            _keyboardRenderer.UpdateTextState(null, null, null, null, true);
+            _keyboardRenderer?.UpdateCommandState(null, null, true);
+            _keyboardRenderer?.UpdateTextState(null, null, null, null, true);
         }
 
         private void DeactivateFrontend()
@@ -557,8 +569,8 @@ namespace Ryujinx.HLE.HOS.Applets
 
                         _dynamicTextInputHandler.TextProcessingEnabled = typingEnabled;
 
-                        _keyboardRenderer.UpdateTextState(null, null, null, null, typingEnabled);
-                        _keyboardRenderer.UpdateCommandState(null, null, controllerEnabled);
+                        _keyboardRenderer?.UpdateTextState(null, null, null, null, typingEnabled);
+                        _keyboardRenderer?.UpdateCommandState(null, null, controllerEnabled);
                     }
                 }
             }
@@ -585,7 +597,7 @@ namespace Ryujinx.HLE.HOS.Applets
 
                 _textValue = text;
                 _cursorBegin = cursorBegin;
-                _keyboardRenderer.UpdateTextState(text, cursorBegin, cursorEnd, overwriteMode, null);
+                _keyboardRenderer?.UpdateTextState(text, cursorBegin, cursorEnd, overwriteMode, null);
 
                 PushUpdatedState(text, cursorBegin, KeyboardResult.NotSet);
             }
@@ -603,10 +615,10 @@ namespace Ryujinx.HLE.HOS.Applets
                 switch (button)
                 {
                     case NpadButton.A:
-                        _keyboardRenderer.UpdateCommandState(_canAcceptController, null, null);
+                        _keyboardRenderer?.UpdateCommandState(_canAcceptController, null, null);
                         break;
                     case NpadButton.B:
-                        _keyboardRenderer.UpdateCommandState(null, _canAcceptController, null);
+                        _keyboardRenderer?.UpdateCommandState(null, _canAcceptController, null);
                         break;
                 }
             }
@@ -622,11 +634,11 @@ namespace Ryujinx.HLE.HOS.Applets
                 {
                     case NpadButton.A:
                         result = KeyboardResult.Accept;
-                        _keyboardRenderer.UpdateCommandState(false, null, null);
+                        _keyboardRenderer?.UpdateCommandState(false, null, null);
                         break;
                     case NpadButton.B:
                         result = KeyboardResult.Cancel;
-                        _keyboardRenderer.UpdateCommandState(null, false, null);
+                        _keyboardRenderer?.UpdateCommandState(null, false, null);
                         break;
                 }
 

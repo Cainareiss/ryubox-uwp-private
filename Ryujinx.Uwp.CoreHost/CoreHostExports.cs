@@ -638,14 +638,12 @@ namespace Ryujinx.Uwp.CoreHost
                     // Initialize the renderer before reserving the Switch DRAM
                     // block. Xbox Dev Mode has only about 5 GiB available.
                     stage = "inicializando renderer " + selectedBackend;
-                    CoreHostLog.Write("memory", string.Format(
-                        "Before renderer init: workingSet={0} bytes, managed={1} bytes",
-                        Environment.WorkingSet,
-                        GC.GetTotalMemory(false)));
+                    LogMemoryCheckpoint("before-renderer-init");
                     renderer.Initialize(_activeSettings.GraphicsDebugLogging
                         ? GraphicsDebugLevel.Error
                         : GraphicsDebugLevel.None);
                     CoreHostLog.Write("graphics", selectedBackend + " renderer initialized before Switch memory reservation");
+                    LogMemoryCheckpoint("after-renderer-init");
 
                     // Preserve the retail Switch memory arrangement (3285 MiB
                     // application pool). A local validation with AppletDev proved
@@ -717,6 +715,17 @@ namespace Ryujinx.Uwp.CoreHost
 
                     AppContext.SetSwitch("Ryujinx.Uwp.SingleAddressSpaceView", false);
                     AppContext.SetSwitch("Ryujinx.Uwp.LazyGuestCommit", true);
+                    // Clean-room page-store work starts behind an explicit opt-in.
+                    // This commit only installs and reports the resident-set policy;
+                    // it does not replace the proven lazy-commit path yet.
+                    bool enableGuestPageStore = string.Equals(
+                        Environment.GetEnvironmentVariable("RYUJINX_UWP_GUEST_PAGE_STORE"),
+                        "1",
+                        StringComparison.Ordinal);
+                    AppContext.SetSwitch("Ryujinx.Uwp.GuestPageStore", enableGuestPageStore);
+                    CoreHostLog.Write(
+                        "memory",
+                        "Guest page store policy: " + UwpGuestPageStorePolicy.Current);
                     AppContext.SetSwitch("Ryujinx.Uwp.ConstrainedScheduling", true);
                     AppContext.SetSwitch("Ryujinx.Uwp.PinnedJitDispatch", usePinnedSafeJit);
                     AppContext.SetSwitch("Ryujinx.Uwp.SafeJit", useSafeJit);
@@ -874,10 +883,7 @@ namespace Ryujinx.Uwp.CoreHost
                             },
                         });
                     }
-                    CoreHostLog.Write("memory", string.Format(
-                        "After Switch creation: workingSet={0} bytes, managed={1} bytes",
-                        Environment.WorkingSet,
-                        GC.GetTotalMemory(false)));
+                    LogMemoryCheckpoint("after-switch-creation");
 
                     stage = "carregando " + gameContainer + ": " + game;
                     CoreHostLog.Write("loader", $"[Session {sessionId}] Loading {gameContainer} {game}");
@@ -1921,6 +1927,8 @@ namespace Ryujinx.Uwp.CoreHost
             long descriptorSampleMilliseconds = intervalStartMilliseconds;
             D3D12DescriptorStats previousDescriptorStats = default;
             D3D12PerformanceStats previousPerformanceStats = default;
+            D3D12PerformanceStats startupPerformanceStats = default;
+            const long StartupDrawTraceLimit = 64;
 
             Switch initializedSwitch = _switch;
             long sessionId = ActiveSessionId;
@@ -1994,6 +2002,28 @@ namespace Ryujinx.Uwp.CoreHost
                         intervalProcessedFrames++;
 
                         long processFrameElapsed = Environment.TickCount64 - processFrameStart;
+                        if (presentedFrameCount == 0 &&
+                            _d3d12SessionRenderer is D3D12Renderer startupRenderer &&
+                            (frameNumber <= StartupDrawTraceLimit || processFrameElapsed >= 250))
+                        {
+                            // Keep this bounded to startup. It identifies whether a black
+                            // screen is spending its time compiling, binding, recording,
+                            // submitting, or waiting without forcing a fence/readback.
+                            D3D12PerformanceStats current = startupRenderer.Device.GetPerformanceStats();
+                            CoreHostLog.Write(
+                                "d3d12-first-frame",
+                                $"processed={frameNumber}; elapsedMs={processFrameElapsed}; " +
+                                $"drawsDelta={current.DrawCalls-startupPerformanceStats.DrawCalls}; passesDelta={current.RenderPasses-startupPerformanceStats.RenderPasses}; " +
+                                $"shaderHitDelta={current.ShaderCacheHits-startupPerformanceStats.ShaderCacheHits}; shaderMissDelta={current.ShaderCacheMisses-startupPerformanceStats.ShaderCacheMisses}; " +
+                                $"shaderCompileUsDelta={current.ShaderCompileMicroseconds-startupPerformanceStats.ShaderCompileMicroseconds}; " +
+                                $"psoHitDelta={current.PsoCacheHits-startupPerformanceStats.PsoCacheHits}; psoCreateDelta={current.PsoCreations-startupPerformanceStats.PsoCreations}; " +
+                                $"psoUsDelta={current.PsoMicroseconds-startupPerformanceStats.PsoMicroseconds}; descriptorUsDelta={current.DescriptorBindMicroseconds-startupPerformanceStats.DescriptorBindMicroseconds}; " +
+                                $"descriptorTableHitDelta={current.DescriptorTableCacheHits-startupPerformanceStats.DescriptorTableCacheHits}; descriptorTableMissDelta={current.DescriptorTableCacheMisses-startupPerformanceStats.DescriptorTableCacheMisses}; " +
+                                $"descriptorCopiesDelta={current.DescriptorCopies-startupPerformanceStats.DescriptorCopies}; " +
+                                $"recordUsDelta={current.RecordMicroseconds-startupPerformanceStats.RecordMicroseconds}; submitUsDelta={current.SubmitMicroseconds-startupPerformanceStats.SubmitMicroseconds}; " +
+                                $"waitUsDelta={current.FenceWaitMicroseconds-startupPerformanceStats.FenceWaitMicroseconds}; invalidPassDelta={current.InvalidRenderPasses-startupPerformanceStats.InvalidRenderPasses}");
+                            startupPerformanceStats = current;
+                        }
                         if (frameNumber <= 4 || processFrameElapsed >= 1000)
                         {
                             CoreHostLog.Write(
@@ -2049,6 +2079,7 @@ namespace Ryujinx.Uwp.CoreHost
 
                         if (presentedFrameCount == 1)
                         {
+                            LogMemoryCheckpoint("first-visible-present");
                             CoreHostLog.Write(
                                 "session",
                                 string.Format(
@@ -2110,6 +2141,9 @@ namespace Ryujinx.Uwp.CoreHost
                             CoreHostLog.Write("d3d12-descriptors",
                                 $"mode={(s.RingEnabled != 0 ? "ring" : "fixed")}; intervalMs={nowMilliseconds-descriptorSampleMilliseconds}; " +
                                 $"viewsDelta={s.ViewAllocations-previousDescriptorStats.ViewAllocations}; samplersDelta={s.SamplerAllocations-previousDescriptorStats.SamplerAllocations}; " +
+                                $"viewsPerDraw={Ratio(s.ViewAllocations-previousDescriptorStats.ViewAllocations, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
+                                $"samplersPerDraw={Ratio(s.SamplerAllocations-previousDescriptorStats.SamplerAllocations, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
+                                $"heapSwitchesPerDraw={Ratio(s.HeapSwitches-previousDescriptorStats.HeapSwitches, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
                                 $"occupied={s.ViewOccupied}/{s.SamplerOccupied}; peakOccupied={s.ViewPeakOccupied}/{s.SamplerPeakOccupied}; " +
                                 $"peakSubmission={s.ViewPeakPerSubmission}/{s.SamplerPeakPerSubmission}; pages={s.ViewPages}/{s.SamplerPages}; " +
                                 $"heapSwitchesDelta={s.HeapSwitches-previousDescriptorStats.HeapSwitches}; pressureDelta={s.PressureEvents-previousDescriptorStats.PressureEvents}; " +
@@ -2123,6 +2157,8 @@ namespace Ryujinx.Uwp.CoreHost
                                 $"psoHitDelta={p.PsoCacheHits-previousPerformanceStats.PsoCacheHits}; " +
                                 $"psoCreateDelta={p.PsoCreations-previousPerformanceStats.PsoCreations}; psoUsDelta={p.PsoMicroseconds-previousPerformanceStats.PsoMicroseconds}; " +
                                 $"descriptorUsDelta={p.DescriptorBindMicroseconds-previousPerformanceStats.DescriptorBindMicroseconds}; recordUsDelta={p.RecordMicroseconds-previousPerformanceStats.RecordMicroseconds}; " +
+                                $"descriptorTableHitDelta={p.DescriptorTableCacheHits-previousPerformanceStats.DescriptorTableCacheHits}; descriptorTableMissDelta={p.DescriptorTableCacheMisses-previousPerformanceStats.DescriptorTableCacheMisses}; " +
+                                $"descriptorCopiesDelta={p.DescriptorCopies-previousPerformanceStats.DescriptorCopies}; copiesPerDraw={Ratio(p.DescriptorCopies-previousPerformanceStats.DescriptorCopies, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
                                 $"submitUsDelta={p.SubmitMicroseconds-previousPerformanceStats.SubmitMicroseconds}; presentUsDelta={p.PresentMicroseconds-previousPerformanceStats.PresentMicroseconds}; " +
                                 $"waitUsDelta={p.FenceWaitMicroseconds-previousPerformanceStats.FenceWaitMicroseconds}; depthDetachedDelta={p.DepthAttachmentsDetached-previousPerformanceStats.DepthAttachmentsDetached}; " +
                                 $"invalidPassDelta={p.InvalidRenderPasses-previousPerformanceStats.InvalidRenderPasses}; uavBarriersDelta={p.UavBarriers-previousPerformanceStats.UavBarriers}");
@@ -2143,6 +2179,9 @@ namespace Ryujinx.Uwp.CoreHost
                 Thread.Yield();
             }
         }
+
+        private static string Ratio(ulong numerator, ulong denominator) =>
+            denominator == 0 ? "0.000" : ((double)numerator / denominator).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
 
         private static int ToStickValue(float value)
         {
@@ -3277,6 +3316,39 @@ namespace Ryujinx.Uwp.CoreHost
 
         }
 
+        private static void LogMemoryCheckpoint(string checkpoint)
+        {
+            string process = RuntimeMemoryBudget.Sample(Environment.WorkingSet, GC.GetTotalMemory(false));
+            string guestCommit = Ryujinx.Cpu.Jit.MemoryManager.GetUwpPrivateCommitTelemetry();
+            UwpGuestPageStorePolicy pageStore = UwpGuestPageStorePolicy.Current;
+            string d3d12 = "d3d12=inactive";
+
+            try
+            {
+                if (_d3d12SessionRenderer is D3D12Renderer renderer)
+                {
+                    ulong[] values = renderer.Device.GetResourceStats();
+                    D3D12DescriptorStats descriptors = renderer.Device.GetDescriptorStats();
+                    d3d12 =
+                        $"d3d12ReservedDefaultHeapBytes={values[0]} d3d12HeapCount={values[1]} " +
+                        $"d3d12PlacedCreations={values[2]} d3d12CommittedCreations={values[3]} " +
+                        $"d3d12HeapCreations={values[4]} d3d12ResourceBudgetBytes={values[5]} " +
+                        $"d3d12ProgramCompiles={values[6]} d3d12PsoCreations={values[7]} " +
+                        $"d3d12LiveLogicalResourceBytes={values[8]} " +
+                        $"d3d12DescriptorHeapBytes={descriptors.EstimatedHeapBytes}";
+                }
+            }
+            catch (Exception exception)
+            {
+                d3d12 = $"d3d12TelemetryError={exception.GetType().Name}:{exception.Message}";
+            }
+
+            CoreHostLog.Write(
+                "memory",
+                $"MEM-CHECKPOINT name={checkpoint} session={ActiveSessionId}; {process}; {guestCommit}; " +
+                $"guestPageStore={pageStore}; residentTargetBytes={pageStore.GetResidentTarget(RuntimeMemoryBudget.Pressure)}; {d3d12}");
+        }
+
         // The logo partition is optional and is never required to launch a
         // title. Extract only the two presentation assets, under a strict
         // per-file limit, into LocalState; the game container itself is never
@@ -3387,6 +3459,7 @@ namespace Ryujinx.Uwp.CoreHost
         private static bool TryCopyBootAsset(IFileSystem sourceFs, string sourcePath, string destinationPath)
         {
             const int MaximumAssetBytes = 16 * 1024 * 1024;
+            const int CopyAttempts = 4;
             string stagingPath = destinationPath + ".tmp";
             try
             {
@@ -3414,7 +3487,29 @@ namespace Ryujinx.Uwp.CoreHost
                 // The staging stream must be disposed before Copy opens it.
                 // Keeping FileShare.None here caused every valid Logo asset to
                 // fail extraction with a self-inflicted sharing violation.
-                System.IO.File.Copy(stagingPath, destinationPath, true);
+                IOException lastSharingViolation = null;
+                for (int attempt = 1; attempt <= CopyAttempts; attempt++)
+                {
+                    try
+                    {
+                        System.IO.File.Copy(stagingPath, destinationPath, true);
+                        lastSharingViolation = null;
+                        break;
+                    }
+                    catch (IOException exception) when (attempt < CopyAttempts)
+                    {
+                        lastSharingViolation = exception;
+                        // The UWP image/GIF decoder can release the previous
+                        // session's URI asynchronously. Bound the wait so a
+                        // stale decoder never turns into an unbounded launch.
+                        Thread.Sleep(attempt * 100);
+                    }
+                }
+
+                if (lastSharingViolation != null)
+                {
+                    throw lastSharingViolation;
+                }
                 System.IO.File.Delete(stagingPath);
                 return true;
             }

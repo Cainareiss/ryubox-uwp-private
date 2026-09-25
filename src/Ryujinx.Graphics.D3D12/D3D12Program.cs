@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
@@ -9,7 +10,51 @@ using Ryujinx.Graphics.Shader;
 namespace Ryujinx.Graphics.D3D12;
 
 public readonly record struct D3D12StreamOutput(string Semantic, uint Index, uint Component, uint Components, uint Buffer, uint Stream, uint Offset, uint Stride);
-public readonly record struct D3D12ShaderSource(ShaderStage Stage, string Hlsl = null, D3D12StreamOutput[] StreamOutput = null, byte[] Binary = null);
+public readonly record struct D3D12ShaderSource(ShaderStage Stage, string Hlsl = null,
+    D3D12StreamOutput[] StreamOutput = null, byte[] Binary = null, byte[] OriginalSpirv = null);
+
+internal static class D3D12ShaderFailureDiagnostics
+{
+    public static void Write(D3D12ShaderSource[] sources, int result, string compilerMessage)
+    {
+        string root = Environment.GetEnvironmentVariable("RYUBOX_D3D12_SHADER_DIAGNOSTICS");
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            string logs = Environment.GetEnvironmentVariable("RYUBOX_D3D12_LOG_DIR");
+            root = string.IsNullOrWhiteSpace(logs)
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Ryubox", "ShaderFailures")
+                : Path.Combine(logs, "shader-failures");
+        }
+        if (string.IsNullOrWhiteSpace(root)) return;
+
+        using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (D3D12ShaderSource source in sources)
+        {
+            hash.AppendData(BitConverter.GetBytes((int)source.Stage));
+            if (source.OriginalSpirv is { Length: > 0 }) hash.AppendData(source.OriginalSpirv);
+            else if (source.Hlsl != null) hash.AppendData(Encoding.UTF8.GetBytes(source.Hlsl));
+        }
+        string id = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant()[..24];
+        string directory = Path.Combine(root, id);
+        Directory.CreateDirectory(directory);
+
+        for (int index = 0; index < sources.Length; index++)
+        {
+            D3D12ShaderSource source = sources[index];
+            string prefix = $"{index}-{source.Stage.ToString().ToLowerInvariant()}";
+            if (source.Hlsl != null)
+                File.WriteAllText(Path.Combine(directory, prefix + ".hlsl"), source.Hlsl, new UTF8Encoding(false));
+            if (source.OriginalSpirv is { Length: > 0 } spirv)
+                File.WriteAllBytes(Path.Combine(directory, prefix + ".spv"), spirv);
+        }
+
+        string message = compilerMessage ?? string.Empty;
+        if (message.Length > 64 * 1024) message = message[..(64 * 1024)];
+        File.WriteAllText(Path.Combine(directory, "compiler.txt"),
+            $"hash={id}{Environment.NewLine}hresult=0x{result:X8}{Environment.NewLine}{message}",
+            new UTF8Encoding(false));
+    }
+}
 
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeStreamOutput
@@ -54,7 +99,7 @@ internal struct NativeProgramBinding
 /// <summary>A bound resource uses its exact reflected stage/register/space.</summary>
 public readonly record struct D3D12ProgramBinding(ShaderStage Stage, uint Type, uint Space, uint Binding,
     D3D12Resource Resource, ulong Offset = 0, ulong Bytes = 0, uint Stride = 0,
-    D3D12SamplerDescriptor Sampler = default, uint ComponentMapping = 0);
+    D3D12SamplerDescriptor Sampler = default, uint ComponentMapping = 0, uint Format = 0);
 
 /// <summary>GAL program backed by compiled D3D12 shaders and a reflected root signature.</summary>
 public sealed class D3D12Program : D3D12Resource, IProgram
@@ -184,18 +229,8 @@ public sealed unsafe partial class D3D12NativeDevice
                 fixed (byte* pointer = detail) ProgramNative.Error(_handle, pointer, (uint)detail.Length);
                 int end = Array.IndexOf(detail, (byte)0);
                 string err = Encoding.UTF8.GetString(detail, 0, end < 0 ? detail.Length : end);
-                try
-                {
-                    string dumpDir = @"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs";
-                    for (int i = 0; i < sources.Length; ++i)
-                    {
-                        if (sources[i].Hlsl != null)
-                        {
-                            File.WriteAllText(Path.Combine(dumpDir, $"failed_shader_{sources[i].Stage}_{i}.hlsl"), sources[i].Hlsl);
-                        }
-                    }
-                }
-                catch { }
+                try { D3D12ShaderFailureDiagnostics.Write(sources, result, err); }
+                catch { /* Diagnostics must never replace the compiler error. */ }
                 throw new InvalidOperationException($"D3D12 program HRESULT=0x{result:X8}: {err}");
             }
             foreach (var source in sources)
@@ -232,24 +267,6 @@ public sealed unsafe partial class D3D12NativeDevice
         }
         catch
         {
-            // Preserve the failing contract, including failures after compilation
-            // (e.g. stream-output reflection), without masking the original error.
-            try
-            {
-                string directory = Environment.GetEnvironmentVariable("RYUBOX_D3D12_LOG_DIR");
-                if (!string.IsNullOrEmpty(directory))
-                {
-                    Directory.CreateDirectory(directory);
-                    foreach (var source in sources)
-                    {
-                        string prefix = Path.Combine(directory, $"failed-program-{source.Stage}");
-                        if (source.Hlsl != null) File.WriteAllText(prefix + ".hlsl", source.Hlsl);
-                        if (source.StreamOutput != null)
-                            File.WriteAllLines(prefix + ".so.txt", source.StreamOutput.Select(e => e.ToString()));
-                    }
-                }
-            }
-            catch { }
             if (id != 0) ReleaseProgram(id);
             throw;
         }
@@ -266,7 +283,7 @@ public sealed unsafe partial class D3D12NativeDevice
             ref readonly var b = ref bindings[i];
             result[i] = new() { Stage = (uint)b.Stage, Type = b.Type, Space = b.Space, Binding = b.Binding,
                 Resource = b.Type == 3 ? 0 : Validate(b.Resource), Offset = b.Offset, Bytes = b.Bytes, Stride = b.Stride,
-                ComponentMapping = b.ComponentMapping, Sampler = b.Sampler };
+                Format = b.Format, ComponentMapping = b.ComponentMapping, Sampler = b.Sampler };
         }
         return result;
     }

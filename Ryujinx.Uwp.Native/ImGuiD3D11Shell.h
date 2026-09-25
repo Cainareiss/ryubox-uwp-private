@@ -15,6 +15,8 @@
 #include "../UWP-ImGuiFrontend/include/UwpImGuiFrontend/Settings.h"
 #include "../UWP-ImGuiFrontend/include/UwpImGuiFrontend/Widgets.h"
 
+struct ImFont;
+
 namespace Ryujinx::Uwp::Native
 {
 struct ImGuiShellInput final
@@ -74,6 +76,10 @@ private:
 	std::unique_ptr<ImGuiD3D12Renderer> m_d12;
 	std::vector<std::uint64_t> m_d12Covers;
 	std::uint64_t m_d12Font = 0;
+	ImFont* m_fontNormal = nullptr;
+	ImFont* m_fontMedium = nullptr;
+	ImFont* m_fontTitle = nullptr;
+	ImFont* m_fontSmall = nullptr;
 	HRESULT CreateDeviceObjects();
 	void DestroyDeviceObjects() noexcept;
 	void BuildFrame();

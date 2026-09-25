@@ -26,7 +26,8 @@ FrontendConfiguration MakeDefaultFrontendConfiguration()
 	configuration.actionHints = {
 		{ "< / >", "Carrossel" },
 		{ "A", "Jogar" },
-		{ "X", "Opções" },
+		{ "X", "Favorito" },
+		{ "Y", "Opções" },
 		{ "LB/RB", "Navegar" },
 		{ "Menu", "Configurações" },
 	};
@@ -80,13 +81,14 @@ void Frontend::SetInterfaceLanguage(bool english)
 		else if (action.id == "graphics") action.label = english ? "Graphics" : "Graficos";
 		else if (action.id == "power") action.label = english ? "Exit" : "Sair";
 	}
-	if (m_configuration.actionHints.size() >= 5)
+	if (m_configuration.actionHints.size() >= 6)
 	{
 		m_configuration.actionHints[0].label = english ? "Carousel" : "Carrossel";
 		m_configuration.actionHints[1].label = english ? "Play" : "Jogar";
-		m_configuration.actionHints[2].label = english ? "Options" : "Opcoes";
-		m_configuration.actionHints[3].label = english ? "Navigate" : "Navegar";
-		m_configuration.actionHints[4].label = english ? "Settings" : "Configuracoes";
+		m_configuration.actionHints[2].label = english ? "Favorite" : "Favorito";
+		m_configuration.actionHints[3].label = english ? "Options" : "Opcoes";
+		m_configuration.actionHints[4].label = english ? "Navigate" : "Navegar";
+		m_configuration.actionHints[5].label = english ? "Settings" : "Configuracoes";
 	}
 }
 
@@ -102,6 +104,13 @@ void Frontend::HandleInput(const FrameInput& input)
 {
 	if (m_pendingLaunch)
 	{
+		m_previousInput = input;
+		return;
+	}
+	if (m_contextItem)
+	{
+		if (input.back && !m_previousInput.back)
+			CloseContextMenu();
 		m_previousInput = input;
 		return;
 	}
@@ -129,8 +138,10 @@ void Frontend::HandleInput(const FrameInput& input)
 	const auto pressed = [](bool current, bool previous) { return current && !previous; };
 	if (pressed(input.accept, m_previousInput.accept))
 		ActivateFocused();
+	// Xbox convention used by the shell: X is the immediate favourite action,
+	// while Y owns the selected-title options modal.
 	if (pressed(input.context, m_previousInput.context))
-		OpenContextMenu();
+		ToggleFavorite();
 	if (pressed(input.back, m_previousInput.back))
 		m_host.Execute(HostCommand::OpenHome);
 	if (pressed(input.menu, m_previousInput.menu))
@@ -138,7 +149,7 @@ void Frontend::HandleInput(const FrameInput& input)
 	if (pressed(input.view, m_previousInput.view))
 		m_host.Execute(HostCommand::OpenTitleManager);
 	if (pressed(input.alternate, m_previousInput.alternate))
-		m_host.Execute(HostCommand::CycleTheme);
+		OpenContextMenu();
 	if (!m_catalogue.empty() && pressed(input.leftShoulder, m_previousInput.leftShoulder))
 	{
 		const std::size_t jump = m_configuration.catalogueLayout == CatalogueLayoutMode::PremiumCarousel3D ?
@@ -335,7 +346,54 @@ void Frontend::OpenContextMenu()
 	if (m_focusArea != ShellFocusArea::Catalogue || m_catalogue.empty() ||
 		m_shell.SelectedIndex() >= m_catalogue.size())
 		return;
-	m_host.OpenContextMenu(m_catalogue[m_shell.SelectedIndex()].id);
+	m_contextItem = m_catalogue[m_shell.SelectedIndex()].id;
+}
+
+void Frontend::ToggleFavorite()
+{
+	if (m_focusArea != ShellFocusArea::Catalogue || m_catalogue.empty() ||
+		m_shell.SelectedIndex() >= m_catalogue.size())
+		return;
+	LibraryItem& item = m_catalogue[m_shell.SelectedIndex()];
+	if (!m_host.ToggleFavorite(item.id))
+		return;
+	item.favorite = !item.favorite;
+	PushNotification({ item.favorite ? "Added to favorites" : "Removed from favorites", 2.0f });
+}
+
+const LibraryItem* Frontend::ContextItem() const noexcept
+{
+	if (!m_contextItem)
+		return nullptr;
+	const auto found = std::find_if(m_catalogue.begin(), m_catalogue.end(),
+		[this](const LibraryItem& item) { return item.id == *m_contextItem; });
+	return found == m_catalogue.end() ? nullptr : &*found;
+}
+
+void Frontend::ActivateContextAction(std::string_view action)
+{
+	const LibraryItem* item = ContextItem();
+	if (!item)
+	{
+		CloseContextMenu();
+		return;
+	}
+	if (action == "start")
+	{
+		CloseContextMenu();
+		ActivateSelection();
+	}
+	else if (action == "favorite")
+	{
+		ToggleFavorite();
+	}
+	else
+	{
+		// File pickers/installers remain host-owned. The reusable modal supplies
+		// consistent focus and routes the selected operation exactly once.
+		m_host.OpenContextMenu(item->id);
+		CloseContextMenu();
+	}
 }
 
 void Frontend::Select(std::size_t index) noexcept

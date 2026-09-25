@@ -53,7 +53,7 @@ struct RyuboxD3D12DescriptorStats
     uint64_t estimatedHeapBytes;
 };
 RYUBOX_D12 RyuboxD3D12_GetDescriptorStats(void* context, RyuboxD3D12DescriptorStats* stats);
-// Versioned timing and render-pass counters. Values are cumulative for the
+// Version 2 timing, render-pass and descriptor-table counters. Values are cumulative for the
 // context and are collected without flushing or waiting for the GPU queue.
 struct RyuboxD3D12PerformanceStats
 {
@@ -63,6 +63,7 @@ struct RyuboxD3D12PerformanceStats
     uint64_t psoMicroseconds, descriptorBindMicroseconds, recordMicroseconds;
     uint64_t submitMicroseconds, presentMicroseconds, fenceWaitMicroseconds;
     uint64_t depthAttachmentsDetached, invalidRenderPasses, uavBarriers;
+    uint64_t descriptorTableCacheHits, descriptorTableCacheMisses, descriptorCopies;
 };
 RYUBOX_D12 RyuboxD3D12_GetPerformanceStats(void* context, RyuboxD3D12PerformanceStats* stats);
 RYUBOX_D12 RyuboxD3D12_BeginFrame(void* context, float r, float g, float b, float a);

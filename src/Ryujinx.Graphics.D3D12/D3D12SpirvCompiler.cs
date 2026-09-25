@@ -140,11 +140,16 @@ public sealed unsafe class D3D12SpirvCompiler : IDisposable
                     hlsl = NormalizeInputStageInterface(hlsl);
                 }
 
+                if (shader.Stage == ShaderStage.Compute)
+                {
+                    hlsl = D3D12ComputeSharedNormalizer.Normalize(hlsl);
+                }
+
                 if (D3D12Pipeline.ProbeTargets)
                 {
                     try { File.WriteAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, $"last_{shader.Stage}.hlsl"), hlsl); } catch {}
                 }
-                return new(shader.Stage, hlsl, streamOutput);
+                return new(shader.Stage, hlsl, streamOutput, OriginalSpirv: (byte[])bytes.Clone());
             }
             finally { if (context != 0) _destroy(context); }
         }

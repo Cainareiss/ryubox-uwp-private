@@ -137,7 +137,12 @@ UINT64 CreateProgram(const RyuboxD12Shader* sources, UINT count)
                 ++performanceStats.shaderCacheMisses;
                 LARGE_INTEGER compileStart{}, compileEnd{};
                 QueryPerformanceCounter(&compileStart);
-                HRESULT hr = D3DCompile(s.source,static_cast<SIZE_T>(s.bytes),"RyuboxD12Program",nullptr,nullptr,
+                const uint64_t sourceHash = HashShaderSource(s.stage, GetShaderCompileFlags(),
+                    s.source, static_cast<size_t>(s.bytes));
+                char sourceName[64]{};
+                snprintf(sourceName, sizeof(sourceName), "ryubox-%s-%016llx.hlsl", profiles[s.stage],
+                    static_cast<unsigned long long>(sourceHash));
+                HRESULT hr = D3DCompile(s.source,static_cast<SIZE_T>(s.bytes),sourceName,nullptr,nullptr,
                     "main",profiles[s.stage],GetShaderCompileFlags(),
                     0,&p->shaders[s.stage],&error);
                 QueryPerformanceCounter(&compileEnd);
@@ -152,7 +157,12 @@ UINT64 CreateProgram(const RyuboxD12Shader* sources, UINT count)
                     OutputDebugStringA(dbg);
                 }
                 if (FAILED(hr) && error) OutputDebugStringA(static_cast<const char*>(error->GetBufferPointer()));
-                if (FAILED(hr) && error) programError.assign(static_cast<const char*>(error->GetBufferPointer()),error->GetBufferSize());
+                if (FAILED(hr))
+                {
+                    programError = "stage=" + std::string(profiles[s.stage]) +
+                        ", sourceHash=" + std::to_string(sourceHash) + "\n";
+                    if (error) programError.append(static_cast<const char*>(error->GetBufferPointer()),error->GetBufferSize());
+                }
                 // Bad shader input is not a device fault. Do not poison a live context.
                 Require(SUCCEEDED(hr));
 
@@ -236,7 +246,12 @@ UINT64 CreateProgram(const RyuboxD12Shader* sources, UINT count)
                     static_cast<UINT>(b.Dimension)},b.Type,static_cast<UINT>(ranges.size()),offset});
                 offset += b.BindCount;
             }
-            if (!table.empty()) { ranges.push_back(std::move(table)); p->tables.emplace_back(s.stage,sampler); }
+            if (!table.empty())
+            {
+                ranges.push_back(std::move(table));
+                p->tables.emplace_back(s.stage,sampler);
+                p->tableSizes.push_back(offset);
+            }
         }
     }
     bool compute = p->shaders[0] != nullptr;
@@ -339,21 +354,29 @@ std::vector<std::shared_ptr<Resource>> BindProgram(const std::shared_ptr<Program
     bool compute = p->compute != nullptr;
     auto& frame=frames[frameIndex];
     std::vector<const RyuboxD12Binding*> matched;
+    std::unordered_map<BindingKey, const RyuboxD12Binding*, BindingKeyHash> supplied;
+    supplied.reserve(count);
+    for (UINT index = 0; index < count; ++index)
+    {
+        const auto& binding = bindings[index];
+        BindingKey key{binding.stage, binding.type, binding.space, binding.binding};
+        Require(supplied.emplace(key, &binding).second);
+    }
     std::map<Resource*,std::pair<std::shared_ptr<Resource>,D3D12_RESOURCE_STATES>> states;
     std::vector<std::pair<TextureView,D3D12_RESOURCE_STATES>> viewStates;
-    std::vector<UINT> sizes(p->tables.size());
+    const std::vector<UINT>& sizes = p->tableSizes;
     // Validate the entire packet before emitting barriers or consuming heap slots.
     for (const auto& reflected : p->bindings)
     {
         const auto& b=reflected.info;
-        sizes[reflected.table] = std::max(sizes[reflected.table],reflected.tableOffset+b.count);
+        Require(sizes[reflected.table] >= reflected.tableOffset+b.count);
         for (UINT element=0;element<b.count;++element)
         {
-            const RyuboxD12Binding* found=nullptr;
-            for (UINT i=0;i<count;++i)
-                if (bindings[i].stage==b.stage && bindings[i].type==b.type && bindings[i].space==b.space &&
-                    bindings[i].binding==b.binding+element) { Require(!found); found=&bindings[i]; }
-            Require(found); matched.push_back(found);
+            BindingKey key{b.stage, b.type, b.space, b.binding + element};
+            auto suppliedBinding = supplied.find(key);
+            Require(suppliedBinding != supplied.end());
+            const RyuboxD12Binding* found = suppliedBinding->second;
+            matched.push_back(found);
             if (b.type==D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
             {
                 const auto& s=found->sampler;
@@ -419,6 +442,110 @@ std::vector<std::shared_ptr<Resource>> BindProgram(const std::shared_ptr<Program
     }
     UINT viewCount=0,samplerCount=0;
     for (UINT i=0;i<sizes.size();++i) (p->tables[i].second ? samplerCount : viewCount)+=sizes[i];
+    std::vector<std::shared_ptr<Resource>> writes;
+    for (const auto& [pointer,entry] : states)
+    {
+        const auto& resource=entry.first;
+        auto state=entry.second;
+        if (state==D3D12_RESOURCE_STATE_UNORDERED_ACCESS) { Transition(resource,state); writes.push_back(resource); }
+        else ReadTransition(resource,state);
+    }
+    for (const auto& [view, state] : viewStates)
+    {
+        if (state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
+        {
+            TransitionView(view, state);
+            writes.push_back(view.resource);
+        }
+        else
+        {
+            ReadTransitionView(view, state);
+        }
+    }
+
+    auto sameBinding = [](const RyuboxD12Binding& left, const RyuboxD12Binding& right)
+    {
+        if (left.stage != right.stage || left.type != right.type || left.space != right.space ||
+            left.binding != right.binding) return false;
+        if (left.type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
+            return std::memcmp(&left.sampler, &right.sampler, sizeof(left.sampler)) == 0;
+        return left.resource == right.resource && left.offset == right.offset && left.bytes == right.bytes &&
+            left.format == right.format && left.stride == right.stride &&
+            left.componentMapping == right.componentMapping;
+    };
+    UINT64 bindingHash = 14695981039346656037ULL;
+    auto hashBytes = [&bindingHash](const void* data, size_t bytes)
+    {
+        const BYTE* value = static_cast<const BYTE*>(data);
+        for (size_t index = 0; index < bytes; ++index)
+        {
+            bindingHash ^= value[index];
+            bindingHash *= 1099511628211ULL;
+        }
+    };
+    ID3D12RootSignature* rootIdentity = p->root.Get();
+    hashBytes(&rootIdentity, sizeof(rootIdentity));
+    for (const RyuboxD12Binding* binding : matched)
+    {
+        hashBytes(&binding->stage, sizeof(binding->stage));
+        hashBytes(&binding->type, sizeof(binding->type));
+        hashBytes(&binding->space, sizeof(binding->space));
+        hashBytes(&binding->binding, sizeof(binding->binding));
+        if (binding->type == D3D12_DESCRIPTOR_RANGE_TYPE_SAMPLER)
+            hashBytes(&binding->sampler, sizeof(binding->sampler));
+        else
+        {
+            hashBytes(&binding->resource, sizeof(binding->resource));
+            hashBytes(&binding->offset, sizeof(binding->offset));
+            hashBytes(&binding->bytes, sizeof(binding->bytes));
+            hashBytes(&binding->format, sizeof(binding->format));
+            hashBytes(&binding->stride, sizeof(binding->stride));
+            hashBytes(&binding->componentMapping, sizeof(binding->componentMapping));
+        }
+    }
+    // Bound CPU-side identity storage independently from the GPU descriptor
+    // ring. Very large one-shot tables should not trade descriptor churn for
+    // unbounded host memory or expensive key comparisons.
+    bool cacheable = matched.size() <= 256 && frame.bindingGroups.size() < 2048;
+    for (const RyuboxD12Binding* binding : matched)
+    {
+        if (binding->type != D3D12_DESCRIPTOR_RANGE_TYPE_CBV) continue;
+        const auto resource = GetResource(binding->resource);
+        const UINT64 alignedSize = Align(std::max<UINT64>(binding->bytes, 256ULL), 256ULL);
+        if (binding->offset % 256 != 0 || binding->bytes % 256 != 0 ||
+            binding->offset + alignedSize > resource->desc.Width)
+        {
+            cacheable = false;
+            break;
+        }
+    }
+    if (cacheable)
+    {
+        Frame::BindingGroup* cached = nullptr;
+        auto [first, last] = frame.bindingGroupLookup.equal_range(bindingHash);
+        for (auto candidate = first; candidate != last && !cached; ++candidate)
+        {
+            auto& group = frame.bindingGroups[candidate->second];
+            if (group.root != p->root.Get() || group.bindings.size() != matched.size()) continue;
+            bool equal = true;
+            for (size_t index = 0; index < matched.size(); ++index)
+                if (!sameBinding(group.bindings[index], *matched[index])) { equal = false; break; }
+            if (equal) cached = &group;
+        }
+        if (cached)
+        {
+            ++performanceStats.descriptorTableCacheHits;
+            if(frame.retainedRoots.insert(p->root.Get()).second) frame.roots.push_back(p->root);
+            BindDescriptorHeaps(cached->viewHeap, cached->samplerHeap);
+            if (compute) commands->SetComputeRootSignature(p->root.Get()); else commands->SetGraphicsRootSignature(p->root.Get());
+            for (UINT table=0; table<cached->gpuStarts.size(); ++table)
+                if (compute) commands->SetComputeRootDescriptorTable(table,cached->gpuStarts[table]);
+                else commands->SetGraphicsRootDescriptorTable(table,cached->gpuStarts[table]);
+            return writes;
+        }
+    }
+    ++performanceStats.descriptorTableCacheMisses;
+
     // Allocate all tables of each type together: a draw can bind only one
     // shader-visible heap of each type, even when the pool has many pages.
     auto views=AllocateDescriptors(false,viewCount);
@@ -438,10 +565,7 @@ std::vector<std::shared_ptr<Resource>> BindProgram(const std::shared_ptr<Program
                 std::memcmp(group.descriptors.data(), samplerDescriptors.data(),
                     samplerDescriptors.size() * sizeof(D3D12_SAMPLER_DESC)) == 0;
         });
-        if (existing != groups.end())
-        {
-            samplers = {existing->heap, existing->offset};
-        }
+        if (existing != groups.end()) samplers = {existing->heap, existing->offset};
         else
         {
             samplers = AllocateDescriptors(true,samplerCount);
@@ -450,29 +574,10 @@ std::vector<std::shared_ptr<Resource>> BindProgram(const std::shared_ptr<Program
             for (const auto& descriptor : samplerDescriptors)
             {
                 device->CreateSampler(&descriptor,cpu);
+                ++performanceStats.descriptorCopies;
                 cpu.ptr += samplerStride;
             }
             groups.push_back({std::move(samplerDescriptors), samplers.heap, samplers.offset});
-        }
-    }
-    std::vector<std::shared_ptr<Resource>> writes;
-    for (const auto& [pointer,entry] : states)
-    {
-        const auto& resource=entry.first;
-        auto state=entry.second;
-        if (state==D3D12_RESOURCE_STATE_UNORDERED_ACCESS) { Transition(resource,state); writes.push_back(resource); }
-        else ReadTransition(resource,state);
-    }
-    for (const auto& [view, state] : viewStates)
-    {
-        if (state == D3D12_RESOURCE_STATE_UNORDERED_ACCESS)
-        {
-            TransitionView(view, state);
-            writes.push_back(view.resource);
-        }
-        else
-        {
-            ReadTransitionView(view, state);
         }
     }
     if(frame.retainedRoots.insert(p->root.Get()).second) frame.roots.push_back(p->root);
@@ -498,6 +603,7 @@ std::vector<std::shared_ptr<Resource>> BindProgram(const std::shared_ptr<Program
             auto cpu=starts[reflected.table];
             cpu.ptr+=static_cast<SIZE_T>(reflected.tableOffset+element)*(b.type==3 ? samplerStride : srvStride);
             if (b.type==3) { continue; }
+            ++performanceStats.descriptorCopies;
             auto resource=GetResource(b.resource);
             if (b.type==2)
             {
@@ -548,7 +654,8 @@ std::vector<std::shared_ptr<Resource>> BindProgram(const std::shared_ptr<Program
                 D3D12_SHADER_RESOURCE_VIEW_DESC desc{};
                 // A GAL texture view may expose BGR, forced zero/one, or any
                 // other valid D3D12 component permutation without copying the
-                // texture. Buffers retain the standard identity mapping.
+                // texture. Typed buffers use it for views such as
+                // Red/Zero/Zero/One; raw/structured callers pass zero.
                 // Some legacy Intel D3D12 drivers crash in CreateShaderResourceView
                 // when a texture SRV carries a non-default component mapping.
                 // Keep this opt-in desktop compatibility escape hatch scoped to
@@ -566,16 +673,17 @@ std::vector<std::shared_ptr<Resource>> BindProgram(const std::shared_ptr<Program
                     auto view = GetTextureView(b.resource);
                     mapping = view.componentMapping;
                 }
-                desc.Shader4ComponentMapping = (resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER ||
-                    !mapping || useDefaultComponentMapping)
+                desc.Shader4ComponentMapping = (!mapping || useDefaultComponentMapping)
                     ? D3D12_DEFAULT_SHADER_4_COMPONENT_MAPPING : mapping;
                 if (resource->desc.Dimension==D3D12_RESOURCE_DIMENSION_BUFFER)
                 {
                     bool raw=reflected.inputType==D3D_SIT_BYTEADDRESS;
-                    UINT stride=raw ? 4 : b.stride;
-                    desc.Format=raw ? DXGI_FORMAT_R32_TYPELESS : DXGI_FORMAT_UNKNOWN;
+                    bool typed=!raw && b.format!=DXGI_FORMAT_UNKNOWN;
+                    UINT stride=raw ? 4 : (typed ? FormatBytes(static_cast<DXGI_FORMAT>(b.format)) : b.stride);
+                    Require(stride && b.offset%stride==0 && b.bytes%stride==0);
+                    desc.Format=raw ? DXGI_FORMAT_R32_TYPELESS : (typed ? static_cast<DXGI_FORMAT>(b.format) : DXGI_FORMAT_UNKNOWN);
                     desc.ViewDimension=D3D12_SRV_DIMENSION_BUFFER;
-                    desc.Buffer={b.offset/stride,static_cast<UINT>(b.bytes/stride),raw ? 0u : stride,
+                    desc.Buffer={b.offset/stride,static_cast<UINT>(b.bytes/stride),typed ? 0u : stride,
                         raw ? D3D12_BUFFER_SRV_FLAG_RAW : D3D12_BUFFER_SRV_FLAG_NONE};
                 }
                 else
@@ -702,6 +810,20 @@ std::vector<std::shared_ptr<Resource>> BindProgram(const std::shared_ptr<Program
                 device->CreateUnorderedAccessView(resource->object.Get(),nullptr,&desc,cpu);
             }
         }
+    if (cacheable)
+    {
+        Frame::BindingGroup group;
+        group.hash = bindingHash;
+        group.root = p->root.Get();
+        group.viewHeap = views.heap;
+        group.samplerHeap = samplers.heap;
+        group.gpuStarts = gpuStarts;
+        group.bindings.reserve(matched.size());
+        for (const RyuboxD12Binding* binding : matched) group.bindings.push_back(*binding);
+        const size_t groupIndex = frame.bindingGroups.size();
+        frame.bindingGroups.push_back(std::move(group));
+        frame.bindingGroupLookup.emplace(bindingHash, groupIndex);
+    }
     // CBV snapshots may dispatch ByteCopy, changing the compute root signature
     // and the command-list PSO. Bind guest tables only after all utility work.
     BindDescriptorHeaps(views.heap,samplers.heap);
@@ -1036,6 +1158,14 @@ void DrawProgram(UINT64 id, const RyuboxD12Binding* bindings, UINT bindingCount,
         append(a.InputSlot); append(a.AlignedByteOffset); append(a.InputSlotClass); append(a.InstanceDataStepRate);
     }
     auto found=p->graphics.find(key);
+    if (found==p->graphics.end() && p->failedGraphics.contains(key))
+    {
+        // The full PSO state is part of the key. A previous recoverable
+        // E_INVALIDARG/unsupported-state failure therefore makes this exact
+        // draw known-bad without affecting valid variants of the program.
+        ++performanceStats.invalidRenderPasses;
+        return;
+    }
     LARGE_INTEGER psoStart{}, psoEnd{};
     QueryPerformanceCounter(&psoStart);
     if (found==p->graphics.end())
@@ -1118,8 +1248,27 @@ void DrawProgram(UINT64 id, const RyuboxD12Binding* bindings, UINT bindingCount,
                     { programError+='\n'; programError+=message->pDescription; }
                 }
             }
+
+            QueryPerformanceCounter(&psoEnd);
+            performanceStats.psoMicroseconds += ElapsedMicroseconds(psoStart, psoEnd);
+
+            // Only invalid/unsupported guest state is recoverable here. OOM,
+            // device loss and unexpected driver errors still use the existing
+            // fatal recovery path instead of being hidden as a skipped draw.
+            if (pipelineResult != E_INVALIDARG && pipelineResult != DXGI_ERROR_UNSUPPORTED)
+            {
+                Check(pipelineResult);
+            }
+
+            if (p->failedGraphics.size() >= 256)
+                p->failedGraphics.erase(p->failedGraphics.begin());
+            p->failedGraphics.emplace(key);
+            lastDiagnostic = programError;
+            OutputDebugStringA(programError.c_str());
+            OutputDebugStringA("\n");
+            ++performanceStats.invalidRenderPasses;
+            return;
         }
-        Check(pipelineResult);
         ++performanceStats.psoCreations;
         found=p->graphics.emplace(std::move(key),pipeline).first;
     }
@@ -1428,11 +1577,21 @@ void DrawProgram(UINT64 id, const RyuboxD12Binding* bindings, UINT bindingCount,
         UINT base[]={draw.indexResource ? static_cast<UINT>(draw.baseVertex) : draw.first,draw.firstInstance};
         commands->SetGraphicsRoot32BitConstants(p->auxiliaryRoot,2,base,0);
     }
-    commands->OMSetBlendFactor(draw.blendConstant);
+    if (!blendFactorBound || memcmp(boundBlendFactor, draw.blendConstant, sizeof(boundBlendFactor)) != 0)
+    {
+        commands->OMSetBlendFactor(draw.blendConstant);
+        memcpy(boundBlendFactor, draw.blendConstant, sizeof(boundBlendFactor));
+        blendFactorBound = true;
+    }
     // The stencil reference is dynamic OM state, not part of the PSO.
     // Leaving it unset makes every guest comparison/replacement use zero.
-    if (depthState && depthDesc.StencilEnable)
+    if (depthState && depthDesc.StencilEnable &&
+        (!stencilReferenceBound || boundStencilReference != depthState->frontRef))
+    {
         commands->OMSetStencilRef(depthState->frontRef);
+        boundStencilReference = depthState->frontRef;
+        stencilReferenceBound = true;
+    }
     D3D12_STREAM_OUTPUT_BUFFER_VIEW streamViews[4]{};
     if(draw.streamOutput) for(UINT s=0;s<4;++s) if(draw.streamBuffers[s].resource)
     {
@@ -1442,9 +1601,26 @@ void DrawProgram(UINT64 id, const RyuboxD12Binding* bindings, UINT bindingCount,
         streamViews[s]={dst->object->GetGPUVirtualAddress()+b.offset,b.bytes,counter->object->GetGPUVirtualAddress()};
     }
     commands->SOSetTargets(0,4,streamViews);
-    commands->IASetPrimitiveTopology(static_cast<D3D_PRIMITIVE_TOPOLOGY>(draw.topology));
+    D3D12_PRIMITIVE_TOPOLOGY primitiveTopology = static_cast<D3D_PRIMITIVE_TOPOLOGY>(draw.topology);
+    if (!topologyBound || boundTopology != primitiveTopology)
+    {
+        commands->IASetPrimitiveTopology(primitiveTopology);
+        boundTopology = primitiveTopology;
+        topologyBound = true;
+    }
     commands->IASetVertexBuffers(0,static_cast<UINT>(views.size()),views.data());
-    commands->RSSetViewports(1,&draw.viewport); commands->RSSetScissorRects(1,&draw.scissor);
+    if (!viewportBound || memcmp(&boundViewport, &draw.viewport, sizeof(boundViewport)) != 0)
+    {
+        commands->RSSetViewports(1,&draw.viewport);
+        boundViewport = draw.viewport;
+        viewportBound = true;
+    }
+    if (!scissorBound || memcmp(&boundScissor, &draw.scissor, sizeof(boundScissor)) != 0)
+    {
+        commands->RSSetScissorRects(1,&draw.scissor);
+        boundScissor = draw.scissor;
+        scissorBound = true;
+    }
     if (draw.indirectResource)
     {
         auto args=Get(draw.indirectResource,D3D12_RESOURCE_DIMENSION_BUFFER);

@@ -233,8 +233,9 @@ public sealed unsafe class D3D12Pipeline : IPipeline
                         // Texture swizzles are a view property. The native layer
                         // encodes this mapping in the SRV rather than changing the
                         // underlying guest texture bytes.
-                        result.Add(new(stage, b.Type, b.Space, (uint)binding, texture.Native,
-                            ComponentMapping: texture.ComponentMapping));
+                        result.Add(new(stage, b.Type, b.Space, (uint)binding, texture.BindingResource,
+                            Offset: texture.BindingOffset, Bytes: texture.BindingBytes,
+                            ComponentMapping: texture.ComponentMapping, Format: texture.BindingFormat));
                         if (texMissed) diagLines?.AppendLine($"  SRV MISS: stage={stage} space={b.Space} binding={binding}");
                     }
                 }
@@ -684,7 +685,7 @@ public sealed unsafe class D3D12Pipeline : IPipeline
                 string targetDesc = color != null ? $"{color.Width}x{color.Height} fmt={color.Info.Format} id={color.Native?.Id}" : "null";
                 string depthDesc = depthTexture != null ? $"{depthTexture.Width}x{depthTexture.Height} fmt={depthTexture.Info.Format} id={depthTexture.Native?.Id}" : "null";
                 string line = $"[SetRenderTarget] target={targetDesc}, depth={depthDesc}\n";
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\draw_targets.txt", line);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "draw_targets.txt"), line);
             }
             catch {}
         }

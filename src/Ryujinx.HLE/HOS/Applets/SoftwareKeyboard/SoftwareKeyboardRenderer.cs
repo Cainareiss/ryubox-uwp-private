@@ -8,7 +8,7 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
     /// <summary>
     /// Class that manages the renderer base class and its state in a multithreaded context.
     /// </summary>
-    internal class SoftwareKeyboardRenderer : IDisposable
+    internal class SoftwareKeyboardRenderer : ISoftwareKeyboardRenderer
     {
         private const int TextBoxBlinkSleepMilliseconds = 100;
         private const int RendererWaitTimeoutMilliseconds = 100;
@@ -155,7 +155,7 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
             }
         }
 
-        internal bool DrawTo(IVirtualMemoryManager destination, ulong position)
+        public bool DrawTo(IVirtualMemoryManager destination, ulong position)
         {
             return _renderer.WriteBufferToMemory(destination, position);
         }

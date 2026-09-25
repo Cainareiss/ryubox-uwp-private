@@ -21,15 +21,24 @@ public sealed class D3D12GalTexture : ITexture
     private int RowBytes => checked(Width * _info.BytesPerPixel);
     private Storage _storage;
     private D3D12Texture _native;
+    private BufferRange _bufferStorage;
+    private bool _bufferStorageSet;
     private readonly bool _ownsNativeView;
     internal D3D12Texture Native { get { ObjectDisposedException.ThrowIf(_storage == null, this); return _native; } }
-    internal uint ComponentMapping { get { _ = Native; return _componentMapping; } }
+    internal D3D12Resource BindingResource => _info.Target == Target.TextureBuffer
+        ? _renderer.Buffer(_bufferStorage.Handle, _bufferStorage.Offset, _bufferStorage.Size)
+        : Native;
+    internal ulong BindingOffset => _info.Target == Target.TextureBuffer ? (ulong)_bufferStorage.Offset : 0;
+    internal ulong BindingBytes => _info.Target == Target.TextureBuffer ? (ulong)_bufferStorage.Size : 0;
+    internal uint BindingFormat => _info.Target == Target.TextureBuffer ? D3D12TextureFormat.Get(_info.Format).Dxgi : 0;
+    internal uint ComponentMapping { get { CheckAlive(); return _componentMapping; } }
     internal TextureCreateInfo Info => _info;
     public int Width => _info.Width;
     public int Height => _info.Height;
     internal D3D12GalTexture(D3D12Renderer renderer, TextureCreateInfo info)
     {
         Validate(info); _renderer = renderer; _info = info; _componentMapping = EncodeComponentMapping(info);
+        if (info.Target == Target.TextureBuffer) return;
         D3D12Texture texture = info.Target == Target.Texture3D
             ? renderer.Device.CreateTexture3D((uint)Width, (uint)Height, (uint)info.Depth, (uint)info.Levels,
                 D3D12TextureFormat.Get(info.Format))
@@ -41,6 +50,18 @@ public sealed class D3D12GalTexture : ITexture
     internal D3D12GalTexture(D3D12GalTexture source, TextureCreateInfo info, int firstLayer, int firstLevel)
     {
         Validate(info);
+        if (info.Target == Target.TextureBuffer)
+        {
+            if (source._info.Target != Target.TextureBuffer)
+                throw new NotSupportedException("A texture resource cannot be viewed as a buffer texture.");
+            source.CheckAlive();
+            _renderer = source._renderer;
+            _info = info;
+            _componentMapping = EncodeComponentMapping(info);
+            _bufferStorage = source._bufferStorage;
+            _bufferStorageSet = true;
+            return;
+        }
         if (!CompatibleStorage(source._info, info))
             throw new NotSupportedException($"D3D12 texture views cannot reinterpret: src(target={source._info.Target}, fmt={source._info.Format}, samples={source._info.Samples}, bpp={source._info.BytesPerPixel}, bw={source._info.BlockWidth}, bh={source._info.BlockHeight}, dsm={source._info.DepthStencilMode}) vs dst(target={info.Target}, fmt={info.Format}, samples={info.Samples}, bpp={info.BytesPerPixel}, bw={info.BlockWidth}, bh={info.BlockHeight}, dsm={info.DepthStencilMode})");
         if (firstLevel < 0 || info.Levels <= 0 || firstLevel > source._info.Levels - info.Levels)
@@ -105,7 +126,11 @@ public sealed class D3D12GalTexture : ITexture
             throw new ArgumentException("Texture dimensions or bytes per pixel do not match its format.");
 
         bool validTarget;
-        if (D3D12Configuration.TextureArrays)
+        if (info.Target == Target.TextureBuffer)
+        {
+            validTarget = info.Samples == 1 && info.Depth == 1 && info.Levels == 1 && !format.IsDepth;
+        }
+        else if (D3D12Configuration.TextureArrays)
         {
             validTarget =
                 (info.Target == Target.Texture2D && info.Samples == 1 && info.Depth == 1) ||
@@ -134,7 +159,14 @@ public sealed class D3D12GalTexture : ITexture
     internal void CheckOwner(D3D12Renderer renderer)
     {
         if (!ReferenceEquals(renderer, _renderer)) throw new ArgumentException("Texture belongs to another renderer.");
-        _ = Native;
+        CheckAlive();
+    }
+    private void CheckAlive()
+    {
+        if (_info.Target == Target.TextureBuffer)
+            ObjectDisposedException.ThrowIf(!_bufferStorageSet, this);
+        else
+            _ = Native;
     }
     internal D3D12GalTexture CreateRenderTargetSliceView(int firstLayer, int layers)
     {
@@ -175,7 +207,7 @@ public sealed class D3D12GalTexture : ITexture
             try
             {
                 string line = $"[CopyTo Subresource] src={Width}x{Height} fmt={_info.Format} id={Native?.Id} (L{srcLayer},M{srcLevel}) -> dst={target.Width}x{target.Height} fmt={target._info.Format} id={target.Native?.Id} (L{dstLayer},M{dstLevel})\n";
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\draw_targets.txt", line);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "draw_targets.txt"), line);
             }
             catch {}
         }
@@ -212,7 +244,7 @@ public sealed class D3D12GalTexture : ITexture
             try
             {
                 string line = $"[CopyTo Extents] src={Width}x{Height} fmt={_info.Format} id={Native?.Id} ({source.X1},{source.Y1}-{source.X2},{source.Y2}) -> dst={texture.Width}x{texture.Height} fmt={texture._info.Format} id={texture.Native?.Id} ({target.X1},{target.Y1}-{target.X2},{target.Y2})\n";
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\draw_targets.txt", line);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "draw_targets.txt"), line);
             }
             catch {}
         }
@@ -531,9 +563,22 @@ public sealed class D3D12GalTexture : ITexture
             _hasBeenUsedBefore = true;
         }
     }
-    public void SetStorage(BufferRange buffer) => throw new NotSupportedException("A non-buffer D3D12 texture cannot be rebound as a buffer texture.");
+    public void SetStorage(BufferRange buffer)
+    {
+        if (_info.Target != Target.TextureBuffer)
+            throw new NotSupportedException("A non-buffer D3D12 texture cannot be rebound as a buffer texture.");
+        _renderer.Buffer(buffer.Handle, buffer.Offset, buffer.Size);
+        _bufferStorage = buffer;
+        _bufferStorageSet = true;
+    }
     public void Release()
     {
+        if (_info.Target == Target.TextureBuffer)
+        {
+            if (_bufferStorageSet) _renderer.ForgetTexture(this);
+            _bufferStorageSet = false;
+            return;
+        }
         var storage = System.Threading.Interlocked.Exchange(ref _storage, null);
         if (storage != null)
         {
