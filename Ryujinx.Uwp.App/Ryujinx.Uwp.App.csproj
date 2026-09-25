@@ -48,7 +48,9 @@
 
   <PropertyGroup>
     <NativeHostBinary Condition="'$(NativeHostBinary)' == ''">$(MSBuildProjectDirectory)\..\Ryujinx.Uwp.Native\bin\x64\$(Configuration)\Ryujinx.Uwp.Native.dll</NativeHostBinary>
-    <CoreHostBinary Condition="'$(CoreHostBinary)' == ''">$(MSBuildProjectDirectory)\..\Ryujinx.Uwp.CoreHost\bin\$(Configuration)\net10.0\win-x64\publish\Ryujinx.Uwp.CoreHost.dll</CoreHostBinary>
+    <CoreHostPublishDirectory Condition="'$(CoreHostPublishDirectory)' == ''">$(MSBuildProjectDirectory)\..\Ryujinx.Uwp.CoreHost\bin\$(Configuration)\net10.0\win-x64\publish</CoreHostPublishDirectory>
+    <CoreHostBinary Condition="'$(CoreHostBinary)' == ''">$(CoreHostPublishDirectory)\Ryujinx.Uwp.CoreHost.dll</CoreHostBinary>
+    <SkiaSharpNativeBinary Condition="'$(SkiaSharpNativeBinary)' == ''">$(CoreHostPublishDirectory)\libSkiaSharp.dll</SkiaSharpNativeBinary>
     <MesaStageDirectory Condition="'$(MesaStageDirectory)' == ''">$(MSBuildProjectDirectory)\..\..\artifacts\xbox\MesaDozenHeadlessXbox</MesaStageDirectory>
     <IncludeMesaDozen Condition="'$(IncludeMesaDozen)' == ''">false</IncludeMesaDozen>
     <SpirvCrossBinary Condition="'$(SpirvCrossBinary)' == ''">$(MSBuildProjectDirectory)\..\..\third_party\SPIRV-Cross\build-uwp-x64-msbuild\spirv-cross-c-shared.dll</SpirvCrossBinary>
@@ -105,8 +107,12 @@
       <Link>Ryujinx.Uwp.Native.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
-    <Content Include="$(CoreHostBinary)" Condition="Exists('$(CoreHostBinary)')">
+    <Content Include="$(CoreHostBinary)">
       <Link>Ryujinx.Uwp.CoreHost.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(SkiaSharpNativeBinary)">
+      <Link>libSkiaSharp.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="$(SpirvCrossBinary)" Condition="Exists('$(SpirvCrossBinary)')">
@@ -136,5 +142,11 @@
     <VisualStudioVersion>17.0</VisualStudioVersion>
   <PackageCertificateKeyFile>Ryujinx.Uwp.App_TemporaryKey.pfx</PackageCertificateKeyFile><PackageCertificatePassword>1234</PackageCertificatePassword></PropertyGroup>
   <Import Project="$(MSBuildExtensionsPath)\Microsoft\WindowsXaml\v$(VisualStudioVersion)\Microsoft.Windows.UI.Xaml.CSharp.targets" />
-</Project>
 
+  <Target Name="ValidateCoreHostNativeDependencies" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(CoreHostBinary)')"
+           Text="Ryujinx.Uwp.CoreHost.dll is missing. Publish Ryujinx.Uwp.CoreHost for win-x64 before creating the MSIX." />
+    <Error Condition="!Exists('$(SkiaSharpNativeBinary)')"
+           Text="The published CoreHost is missing libSkiaSharp.dll. Publish Ryujinx.Uwp.CoreHost for win-x64 before creating the MSIX." />
+  </Target>
+</Project>

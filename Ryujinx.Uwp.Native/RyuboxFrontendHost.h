@@ -39,6 +39,7 @@ public:
     void ReleaseTexture(UwpImGuiFrontend::TextureHandle texture) override;
     bool RequestLaunch(UwpImGuiFrontend::ItemId item) override;
     void OpenContextMenu(UwpImGuiFrontend::ItemId item) override;
+    bool ToggleFavorite(UwpImGuiFrontend::ItemId item) override;
     void Execute(UwpImGuiFrontend::HostCommand command) override;
     void DrawSettingsPage(std::string_view pageId) override;
     void OpenUri(std::string_view uri) override;

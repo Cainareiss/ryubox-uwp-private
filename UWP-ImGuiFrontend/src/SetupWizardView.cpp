@@ -74,6 +74,18 @@ SetupWizardViewResult DrawSetupWizard(SetupWizard& wizard, float deltaSeconds,
 	wizard.Tick(deltaSeconds);
 	const SetupWizardState& state = wizard.State();
 	const bool restoreFocus = wizard.ConsumeFocusRestore();
+	// PopupManager owns the logical modal, while ImGui owns a second retained
+	// popup stack.  Completing an operation removes the logical owner first;
+	// explicitly consume the close request so the ImGui modal cannot remain at
+	// 100% and continue capturing gamepad focus on the following screen.
+	if (state.requestClosePopup && ImGui::IsPopupOpen("ryubox-setup-progress"))
+	{
+		if (BeginShellModal("ryubox-setup-progress"))
+		{
+			ImGui::CloseCurrentPopup();
+			EndShellModal();
+		}
+	}
 	SectionTitle(StepTitle(state.step, english));
 	ImGui::TextWrapped("%s", StepDescription(state.step, english));
 	ImGui::Spacing();

@@ -269,10 +269,23 @@ HRESULT ImGuiD3D11Shell::InitializeUi()
 	const std::filesystem::path fontPath = std::filesystem::path(executablePath).parent_path() /
 		L"resources" / L"fonts" / L"Lato-Medium.ttf";
 	const std::string fontUtf8 = Utf8(fontPath.native());
-	if (fontUtf8.empty() || !std::filesystem::exists(fontPath) ||
-		io.Fonts->AddFontFromFileTTF(fontUtf8.c_str(), 20.0f) == nullptr)
+	if (!fontUtf8.empty() && std::filesystem::exists(fontPath))
 	{
-		io.Fonts->AddFontDefault();
+		ImFontConfig config{};
+		config.OversampleH = 2;
+		config.OversampleV = 2;
+		config.PixelSnapH = true;
+		m_fontSmall = io.Fonts->AddFontFromFileTTF(fontUtf8.c_str(), 14.0f, &config);
+		m_fontNormal = io.Fonts->AddFontFromFileTTF(fontUtf8.c_str(), 18.0f, &config);
+		m_fontMedium = io.Fonts->AddFontFromFileTTF(fontUtf8.c_str(), 21.0f, &config);
+		m_fontTitle = io.Fonts->AddFontFromFileTTF(fontUtf8.c_str(), 32.0f, &config);
+	}
+	if (!m_fontNormal || !m_fontMedium || !m_fontTitle || !m_fontSmall)
+	{
+		m_fontNormal = io.Fonts->AddFontDefault();
+		m_fontMedium = m_fontNormal;
+		m_fontTitle = m_fontNormal;
+		m_fontSmall = m_fontNormal;
 	}
 
 	ImGuiStyle& style = ImGui::GetStyle();
@@ -321,6 +334,10 @@ void ImGuiD3D11Shell::Shutdown() noexcept
 	m_previousButtons = 0;
 	m_previousLeftX = 0.0f;
 	m_previousLeftY = 0.0f;
+	m_fontNormal = nullptr;
+	m_fontMedium = nullptr;
+	m_fontTitle = nullptr;
+	m_fontSmall = nullptr;
 }
 
 HRESULT ImGuiD3D11Shell::Resize(ID3D11RenderTargetView* renderTarget,
@@ -485,7 +502,6 @@ void ImGuiD3D11Shell::SetOperation(const wchar_t* message, float progress, int s
 void ImGuiD3D11Shell::SetOnboardingState(bool completed, int language, int theme,
 	bool keysReady, bool firmwareReady, bool gamesReady) noexcept
 {
-	const bool firmwareJustCompleted = !m_onboardingFirmwareReady && firmwareReady;
 	m_onboardingCompleted = completed;
 	m_onboardingLanguage = language == 1 ? 1 : 0;
 	m_onboardingTheme = theme == 1 ? 1 : 0;
@@ -494,8 +510,6 @@ void ImGuiD3D11Shell::SetOnboardingState(bool completed, int language, int theme
 	m_onboardingGamesReady = gamesReady;
 	if (g_frontend)
 		g_frontend->SetInterfaceLanguage(m_onboardingLanguage == 1);
-	if (firmwareJustCompleted && !completed && m_onboardingPage == 1 && m_operationState == 2)
-		m_onboardingFirmwarePopup = true;
 	if (completed)
 	{
 		m_onboardingPage = 0;
@@ -758,6 +772,11 @@ void ImGuiD3D11Shell::BuildFrame()
 		{
 			UwpImGuiFrontend::ShellPresentation presentation{};
 			presentation.themeIndex = m_onboardingTheme == 1 ? 2 : 0;
+			presentation.font = m_fontNormal;
+			presentation.normalFont = m_fontNormal;
+			presentation.mediumFont = m_fontMedium;
+			presentation.titleFont = m_fontTitle;
+			presentation.smallFont = m_fontSmall;
 			presentation.showActionHints = true;
 			presentation.controllerStatus = m_d12 ? "Xbox Series  •  D3D12" : "Xbox Series  •  D3D11";
 			if (!g_frontend->Catalogue().empty())
@@ -771,7 +790,10 @@ void ImGuiD3D11Shell::BuildFrame()
 		}
 
 
-		if (m_operationState != 0 && !m_operationMessage.empty())
+		// Onboarding owns its progress presentation. Rendering the global status
+		// window at the same time produced the two simultaneous 100% panels that
+		// trapped controller focus during keys/firmware/folder setup.
+		if (m_onboardingCompleted && m_operationState != 0 && !m_operationMessage.empty())
 		{
 			const ImVec4 accent = m_operationState == 3
 				? ImVec4(1.0f, 0.25f, 0.28f, 1.0f)
@@ -871,6 +893,7 @@ void ImGuiD3D11Shell::DrawOnboarding()
 	auto fullButton = [&](const char* label) {
 		return ImGui::Button(label, { -1.0f, 48.0f * scale });
 	};
+	const bool operationActive = m_operationState == 1;
 
 	if (m_onboardingPage == 0)
 	{
@@ -908,14 +931,19 @@ void ImGuiD3D11Shell::DrawOnboarding()
 		ImGui::TextColored(statusColor(m_onboardingKeysReady), "%s  -  %s",
 			english ? "Select prod.keys" : "Selecione seus prod.keys",
 			statusText(m_onboardingKeysReady));
+		ImGui::BeginDisabled(operationActive);
 		if (fullButton(english ? "Select keys folder" : "Selecionar pasta das keys"))
 			SetPendingAction(-1003);
+		ImGui::SetItemDefaultFocus();
+		ImGui::EndDisabled();
 		ImGui::Spacing();
 		ImGui::TextColored(statusColor(m_onboardingFirmwareReady), "%s  -  %s",
 			english ? "Install firmware" : "Instalar firmware",
 			statusText(m_onboardingFirmwareReady));
+		ImGui::BeginDisabled(operationActive);
 		if (fullButton(english ? "Select firmware file" : "Selecionar arquivo de firmware"))
 			SetPendingAction(-1001);
+		ImGui::EndDisabled();
 		if (m_operationState == 1)
 		{
 			const float progress = std::clamp(m_operationProgress, 0.0f, 1.0f);
@@ -926,7 +954,7 @@ void ImGuiD3D11Shell::DrawOnboarding()
 		}
 		ImGui::Dummy({ 0.0f, 28.0f * scale });
 		const bool systemReady = m_onboardingKeysReady && m_onboardingFirmwareReady;
-		ImGui::BeginDisabled(!systemReady);
+		ImGui::BeginDisabled(!systemReady || operationActive);
 		if (fullButton(english ? "Next" : "Seguinte"))
 			m_onboardingPage = 2;
 		ImGui::EndDisabled();
@@ -943,8 +971,11 @@ void ImGuiD3D11Shell::DrawOnboarding()
 		ImGui::TextColored(statusColor(m_onboardingGamesReady), "%s  -  %s",
 			english ? "Select games folder" : "Selecione pasta de jogos",
 			statusText(m_onboardingGamesReady));
+		ImGui::BeginDisabled(operationActive);
 		if (fullButton(english ? "Select games folder" : "Selecionar pasta de jogos"))
 			SetPendingAction(-1000);
+		ImGui::SetItemDefaultFocus();
+		ImGui::EndDisabled();
 		ImGui::Spacing();
 		ImGui::TextColored(theme.textSecondary, "%s",
 			english ? "Select theme style" : "Selecione estilo de tema");
@@ -955,28 +986,10 @@ void ImGuiD3D11Shell::DrawOnboarding()
 			m_onboardingTheme == 1))
 			m_onboardingTheme = 1;
 		ImGui::Dummy({ 0.0f, 80.0f * scale });
-		ImGui::BeginDisabled(!m_onboardingGamesReady);
+		ImGui::BeginDisabled(!m_onboardingGamesReady || operationActive);
 		if (fullButton(english ? "Finish setup" : "Concluir configuracao"))
 			SetPendingAction(m_onboardingTheme == 1 ? -1111 : -1110);
 		ImGui::EndDisabled();
-	}
-
-	if (m_onboardingFirmwarePopup)
-		ImGui::OpenPopup("##firmware-installed");
-	ImGui::SetNextWindowPos({ viewport.x * 0.5f, viewport.y * 0.5f }, ImGuiCond_Appearing,
-		{ 0.5f, 0.5f });
-	if (ImGui::BeginPopupModal("##firmware-installed", nullptr,
-		ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings))
-	{
-		ImGui::TextColored(ImVec4(0.20f, 0.90f, 0.54f, 1.0f), "%s",
-			english ? "Installation completed successfully" : "Instalacao concluida com sucesso");
-		ImGui::Spacing();
-		if (ImGui::Button("OK", { 280.0f * scale, 42.0f * scale }))
-		{
-			m_onboardingFirmwarePopup = false;
-			ImGui::CloseCurrentPopup();
-		}
-		ImGui::EndPopup();
 	}
 
 	ImGui::EndChild();

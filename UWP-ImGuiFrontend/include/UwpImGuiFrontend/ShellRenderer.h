@@ -12,7 +12,13 @@ struct ShellPresentation
 {
 	int themeIndex = 0;
 	const ShellTheme* customTheme = nullptr;
+	// Open-source packaged font roles. Hosts may leave individual roles null;
+	// the renderer then falls back to font and finally ImGui's default font.
 	ImFont* font = nullptr;
+	ImFont* normalFont = nullptr;
+	ImFont* mediumFont = nullptr;
+	ImFont* titleFont = nullptr;
+	ImFont* smallFont = nullptr;
 	bool showActionHints = false;
 	std::string controllerStatus;
 	// Hosts opt in when battery telemetry is available.

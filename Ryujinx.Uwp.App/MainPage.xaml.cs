@@ -75,6 +75,7 @@ namespace Ryujinx.Uwp.App
                 if (phase.StartsWith("Preparando", StringComparison.OrdinalIgnoreCase))
                 {
                     _firstGuestPresentObserved = false;
+                    ReleaseBootAssets();
                     _bootScreen.Begin("jogo");
                 }
                 else if (phase.StartsWith("Carregando arquivos", StringComparison.OrdinalIgnoreCase))
@@ -463,6 +464,17 @@ namespace Ryujinx.Uwp.App
                 BootStartupMovie.Source = null;
                 BootStartupMovie.Visibility = Visibility.Collapsed;
             }
+        }
+
+        private void ReleaseBootAssets()
+        {
+            // Release the XAML image/GIF decoders before CoreHost replaces the
+            // same title's files on a rapid relaunch. BitmapImage otherwise
+            // keeps an AppContainer file handle alive beyond session cleanup.
+            BootLogo.Source = null;
+            BootStartupMovie.Source = null;
+            BootStartupMovie.Visibility = Visibility.Collapsed;
+            _loadedBootAssetProgramId = 0;
         }
 
         private void CoreWindow_PointerMoved(CoreWindow sender, PointerEventArgs args)

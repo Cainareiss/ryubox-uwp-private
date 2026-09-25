@@ -1,11 +1,13 @@
 #include "UwpImGuiFrontend/ShellRenderer.h"
 #include "UwpImGuiFrontend/Text.h"
+#include "UwpImGuiFrontend/Views.h"
 #include "UwpImGuiFrontend/Widgets.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 #include <map>
 #include <random>
@@ -34,31 +36,34 @@ ImTextureID TextureReference(std::uintptr_t id)
 #endif
 
 ImVec2 TextSizeUnits(const ShellLayoutContext& context, float sizeUnits,
-	std::string_view text)
+	std::string_view text, ImFont* font = nullptr)
 {
 	if (text.empty())
 		return {};
-	const ImVec2 pixels = ImGui::GetFont()->CalcTextSizeA(sizeUnits * context.uiScale,
+	font = font ? font : ImGui::GetFont();
+	const ImVec2 pixels = font->CalcTextSizeA(sizeUnits * context.uiScale,
 		FLT_MAX, 0.0f, text.data(), text.data() + text.size());
 	return { pixels.x / context.uiScale, pixels.y / context.uiScale };
 }
 
 void DrawText(ImDrawList* draw, const ShellLayoutContext& context, float sizeUnits,
-	ImVec2 positionUnits, ImU32 color, std::string_view text)
+	ImVec2 positionUnits, ImU32 color, std::string_view text, ImFont* font = nullptr)
 {
 	if (!draw || text.empty())
 		return;
-	draw->AddText(ImGui::GetFont(), sizeUnits * context.uiScale,
+	font = font ? font : ImGui::GetFont();
+	draw->AddText(font, sizeUnits * context.uiScale,
 		ToPx(context, positionUnits), color, text.data(), text.data() + text.size());
 }
 
 std::string Ellipsize(const ShellLayoutContext& context, float sizeUnits,
-	std::string text, float maxWidth)
+	std::string text, float maxWidth, ImFont* font = nullptr)
 {
-	if (TextSizeUnits(context, sizeUnits, text).x <= maxWidth)
+	if (TextSizeUnits(context, sizeUnits, text, font).x <= maxWidth)
 		return text;
 	constexpr std::string_view suffix = "...";
-	while (!text.empty() && TextSizeUnits(context, sizeUnits, text + std::string(suffix)).x > maxWidth)
+	while (!text.empty() && TextSizeUnits(context, sizeUnits,
+		text + std::string(suffix), font).x > maxWidth)
 	{
 		std::size_t eraseAt = text.size() - 1;
 		while (eraseAt > 0 && (static_cast<unsigned char>(text[eraseAt]) & 0xc0u) == 0x80u)
@@ -166,6 +171,11 @@ class ShellRenderer::Impl
 {
 public:
 	explicit Impl(IFrontendHost& host) : m_host(host) {}
+
+	ImFont* FontOr(ImFont* role) const noexcept
+	{
+		return role ? role : (m_normalFont ? m_normalFont : ImGui::GetFont());
+	}
 
 	~Impl()
 	{
@@ -674,6 +684,120 @@ public:
 			Color(theme.textSecondary), text);
 	}
 
+	enum class HomeGlyph
+	{
+		Docked,
+		Handheld,
+		Resolution,
+		Favorite,
+		Update,
+		Mods,
+	};
+
+	void DrawHomeGlyph(ImDrawList* draw, HomeGlyph glyph, ImVec2 center,
+		float size, ImU32 color) const
+	{
+		const float line = std::max(1.4f, size * 0.11f);
+		switch (glyph)
+		{
+		case HomeGlyph::Docked:
+			draw->AddRect({ center.x - size * 0.58f, center.y - size * 0.42f },
+				{ center.x + size * 0.58f, center.y + size * 0.32f }, color, size * 0.10f, 0, line);
+			draw->AddLine({ center.x, center.y + size * 0.32f },
+				{ center.x, center.y + size * 0.55f }, color, line);
+			draw->AddLine({ center.x - size * 0.34f, center.y + size * 0.55f },
+				{ center.x + size * 0.34f, center.y + size * 0.55f }, color, line);
+			break;
+		case HomeGlyph::Handheld:
+			draw->AddRect({ center.x - size * 0.65f, center.y - size * 0.38f },
+				{ center.x + size * 0.65f, center.y + size * 0.38f }, color, size * 0.24f, 0, line);
+			draw->AddRect({ center.x - size * 0.34f, center.y - size * 0.29f },
+				{ center.x + size * 0.34f, center.y + size * 0.29f }, color, size * 0.05f, 0, line);
+			draw->AddCircleFilled({ center.x - size * 0.49f, center.y }, line, color);
+			draw->AddCircleFilled({ center.x + size * 0.49f, center.y }, line, color);
+			break;
+		case HomeGlyph::Resolution:
+			draw->AddRect({ center.x - size * 0.52f, center.y - size * 0.38f },
+				{ center.x + size * 0.52f, center.y + size * 0.38f }, color, size * 0.08f, 0, line);
+			draw->AddLine({ center.x - size * 0.34f, center.y + size * 0.18f },
+				{ center.x + size * 0.30f, center.y - size * 0.18f }, color, line);
+			break;
+		case HomeGlyph::Favorite:
+		{
+			std::array<ImVec2, 10> star{};
+			for (std::size_t index = 0; index < star.size(); ++index)
+			{
+				const float radius = index % 2 == 0 ? size * 0.58f : size * 0.25f;
+				const float angle = -1.5707963f + static_cast<float>(index) * 0.6283185f;
+				star[index] = { center.x + std::cos(angle) * radius,
+					center.y + std::sin(angle) * radius };
+			}
+			draw->AddConvexPolyFilled(star.data(), static_cast<int>(star.size()), color);
+			break;
+		}
+		case HomeGlyph::Update:
+			draw->AddCircle(center, size * 0.46f, color, 18, line);
+			draw->AddLine({ center.x, center.y - size * 0.24f },
+				{ center.x, center.y + size * 0.20f }, color, line);
+			draw->AddTriangleFilled({ center.x - size * 0.20f, center.y + size * 0.10f },
+				{ center.x + size * 0.20f, center.y + size * 0.10f },
+				{ center.x, center.y + size * 0.36f }, color);
+			break;
+		case HomeGlyph::Mods:
+			draw->AddRectFilled({ center.x - size * 0.52f, center.y - size * 0.12f },
+				{ center.x + size * 0.52f, center.y + size * 0.12f }, color, size * 0.08f);
+			draw->AddRectFilled({ center.x - size * 0.12f, center.y - size * 0.52f },
+				{ center.x + size * 0.12f, center.y + size * 0.52f }, color, size * 0.08f);
+			break;
+		}
+	}
+
+	float DrawHomeChip(ImDrawList* draw, const ShellLayoutContext& context,
+		const ShellTheme& theme, float x, float y, HomeGlyph glyph,
+		std::string_view label, bool accent = false) const
+	{
+		ImFont* font = FontOr(m_smallFont);
+		const float textWidth = TextSizeUnits(context, 11.5f, label, font).x;
+		const float width = textWidth + 43.0f;
+		const UnitRect rect{ x, y, width, 27.0f };
+		const ImU32 background = ColorWithAlpha(
+			accent ? theme.cursorNormal : theme.panelBase, accent ? 0.34f : 0.86f);
+		draw->AddRectFilled(RectMinPx(context, rect), RectMaxPx(context, rect),
+			background, 13.5f * context.uiScale);
+		draw->AddRect(RectMinPx(context, rect), RectMaxPx(context, rect),
+			ColorWithAlpha(accent ? theme.cursorNormal : theme.panelBorder, 0.72f),
+			13.5f * context.uiScale, 0, context.uiScale);
+		DrawHomeGlyph(draw, glyph, ToPx(context, { x + 16.0f, y + 13.5f }),
+			9.0f * context.uiScale, Color(theme.textPrimary));
+		DrawText(draw, context, 11.5f, { x + 30.0f, y + 6.0f },
+			Color(theme.textPrimary), label, font);
+		return width;
+	}
+
+	void DrawHomeStatus(ImDrawList* draw, const ShellLayoutContext& context,
+		const ShellTheme& theme, const LibraryItem& item) const
+	{
+		char scale[16]{};
+		std::snprintf(scale, sizeof(scale), "%.1fx", item.resolutionScale);
+		struct Chip { HomeGlyph glyph; std::string label; bool accent; };
+		std::vector<Chip> chips;
+		const bool handheld = item.consoleMode == "Handheld" || item.consoleMode == "Portable";
+		chips.push_back({ handheld ? HomeGlyph::Handheld : HomeGlyph::Docked,
+			handheld ? "PORTATIL" : "TV", false });
+		chips.push_back({ HomeGlyph::Resolution, scale, false });
+		if (item.favorite) chips.push_back({ HomeGlyph::Favorite, "FAVORITO", true });
+		if (item.updateActive) chips.push_back({ HomeGlyph::Update, "UPDATE", true });
+		if (item.modsActive) chips.push_back({ HomeGlyph::Mods, "MODS", true });
+
+		float total = 0.0f;
+		for (const Chip& chip : chips)
+			total += TextSizeUnits(context, 11.5f, chip.label, FontOr(m_smallFont)).x + 51.0f;
+		float x = std::max(92.0f, (context.layoutUnitsW - total) * 0.5f);
+		for (const Chip& chip : chips)
+			x += DrawHomeChip(draw, context, theme, x, context.layoutUnitsH - 151.0f,
+				chip.glyph, chip.label, chip.accent) + 8.0f;
+	}
+
 	void DrawPremiumCarousel(ImDrawList* draw, const ShellLayoutContext& context,
 		Frontend& frontend, const ShellPresentation& presentation, const ShellTheme& theme,
 		float deltaSeconds)
@@ -814,6 +938,7 @@ public:
 				{ (context.layoutUnitsW - size.x) * 0.5f, context.layoutUnitsH - 118.0f },
 				Color(theme.textSecondary), fitted);
 		}
+		DrawHomeStatus(draw, context, theme, item);
 
 		DrawTitlePill(draw, context, frontend, theme, deltaSeconds);
 		if (carousel.showPositionIndicator)
@@ -1021,7 +1146,8 @@ public:
 		}
 		constexpr float padding = 48.0f;
 		const float maximumWidth = std::max(54.0f, context.layoutUnitsW - 64.0f);
-		const float naturalWidth = std::ceil(TextSizeUnits(context, 24.0f, title).x) + padding;
+		ImFont* titleFont = FontOr(m_titleFont);
+		const float naturalWidth = std::ceil(TextSizeUnits(context, 24.0f, title, titleFont).x) + padding;
 		const float targetWidth = std::min(maximumWidth, naturalWidth);
 		const float targetX = (context.layoutUnitsW - targetWidth) * 0.5f;
 		if (m_titleWidth.value <= 0.5f)
@@ -1043,14 +1169,14 @@ public:
 		DrawShellPanelPx(draw, RectMinPx(context, rect), RectMaxPx(context, rect), theme,
 			21.0f * context.uiScale, 0.92f);
 		const std::string fitted = Ellipsize(context, 24.0f, title,
-			std::max(4.0f, rect.w - padding));
-		const ImVec2 textSize = TextSizeUnits(context, 24.0f, fitted);
+			std::max(4.0f, rect.w - padding), titleFont);
+		const ImVec2 textSize = TextSizeUnits(context, 24.0f, fitted, titleFont);
 		draw->PushClipRect(RectMinPx(context, rect), RectMaxPx(context, rect), true);
 		DrawText(draw, context, 24.0f,
 			{ rect.x + (rect.w - textSize.x) * 0.5f,
 			  rect.y + (rect.h - textSize.y) * 0.5f +
 				  (1.0f - m_titleReveal.value) * 3.0f },
-			ColorWithAlpha(theme.textPrimary, m_titleReveal.value), fitted);
+			ColorWithAlpha(theme.textPrimary, m_titleReveal.value), fitted, titleFont);
 		draw->PopClipRect();
 	}
 
@@ -1147,7 +1273,15 @@ public:
 		constexpr ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration |
 			ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings |
 			ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoBackground;
-		ImFont* frontendFont = ResolveFrontendTextFont(presentation.font);
+		m_normalFont = ResolveFrontendTextFont(
+			presentation.normalFont ? presentation.normalFont : presentation.font);
+		m_mediumFont = ResolveFrontendTextFont(
+			presentation.mediumFont ? presentation.mediumFont : m_normalFont);
+		m_titleFont = ResolveFrontendTextFont(
+			presentation.titleFont ? presentation.titleFont : m_mediumFont);
+		m_smallFont = ResolveFrontendTextFont(
+			presentation.smallFont ? presentation.smallFont : m_normalFont);
+		ImFont* frontendFont = FontOr(m_normalFont);
 		if (frontendFont)
 			ImGui::PushFont(frontendFont);
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 0.0f, 0.0f });
@@ -1170,6 +1304,38 @@ public:
 			theme, notifications);
 		BeginPendingLaunch(context, frontend, presentation);
 		DrawLaunchAnimation(draw, context, frontend, theme, dt);
+		if (const LibraryItem* contextItem = frontend.ContextItem())
+		{
+			TitleOptionsModel model;
+			model.title = contextItem->name;
+			if (contextItem->contentId != 0)
+			{
+				char titleId[17]{};
+				std::snprintf(titleId, sizeof(titleId), "%016llX",
+					static_cast<unsigned long long>(contextItem->contentId));
+				model.titleId = titleId;
+			}
+			model.subtitle = contextItem->platform;
+			model.metadata = contextItem->metadata;
+			model.actions = MakeDefaultTitleOptionActions(contextItem->favorite);
+			char resolution[16]{};
+			std::snprintf(resolution, sizeof(resolution), "%.1fx", contextItem->resolutionScale);
+			model.information = {
+				{ "Console mode", contextItem->consoleMode },
+				{ "Resolution", resolution },
+				{ "Update", contextItem->updateActive ? "Active" : "Not installed" },
+				{ "Mods", contextItem->modsActive ? "Enabled" : "Disabled" },
+			};
+			if (const MediaAsset* cover = FindMedia(*contextItem, MediaKind::Cover2D))
+				model.artwork = Texture(cover->path);
+			const UnitRect panel = CenteredPanel(context, 1080.0f, 610.0f, 28.0f);
+			const TitleOptionsResult options = DrawTitleOptionsView(context,
+				ImGui::GetForegroundDrawList(), panel, m_titleOptions, model, frontendFont);
+			if (options.closeRequested)
+				frontend.CloseContextMenu();
+			else if (options.activatedAction)
+				frontend.ActivateContextAction(*options.activatedAction);
+		}
 		ImGui::End();
 		ImGui::PopStyleVar();
 		if (frontendFont)
@@ -1182,6 +1348,11 @@ private:
 	std::vector<FloatingShape> m_shapes;
 	ImVec2 m_shapeArea{};
 	std::map<std::size_t, float> m_focusAmounts;
+	TitleOptionsState m_titleOptions;
+	ImFont* m_normalFont = nullptr;
+	ImFont* m_mediumFont = nullptr;
+	ImFont* m_titleFont = nullptr;
+	ImFont* m_smallFont = nullptr;
 	float m_carouselVisualIndex = 0.0f;
 	bool m_carouselInitialized = false;
 	std::size_t m_lastPage = static_cast<std::size_t>(-1);
