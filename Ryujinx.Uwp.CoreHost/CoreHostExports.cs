@@ -812,6 +812,9 @@ namespace Ryujinx.Uwp.CoreHost
                     // process-budget admission check. Always assign this per
                     // session so a previous title cannot change the next limit.
                     AppContext.SetData("Ryujinx.Uwp.JitCacheMaxRegions", 8);
+                    // Finer JIT reservation steps (same total capacity). Read
+                    // once per process by JitCache; later sessions keep it.
+                    AppContext.SetData("Ryujinx.Uwp.JitCacheRegionMiB", 128);
                     AppContext.SetSwitch("Ryujinx.Uwp.D3D12DisableGuestCounters", true);
                     AppContext.SetSwitch("Ryujinx.Uwp.SafeAudioRenderer", true);
                     AppContext.SetSwitch("Ryujinx.Uwp.AudioPcmStartupGuard", true);

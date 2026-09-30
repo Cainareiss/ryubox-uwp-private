@@ -39,6 +39,8 @@ RYUBOX_D12 RyuboxD3D12_GetInfo(void* context, RyuboxD3D12Info* info);
 // creations, heap creations, resource budget, program FXC calls, graphics PSO
 // creations, live logical resource bytes. Upload/readback are not included.
 RYUBOX_D12 RyuboxD3D12_GetResourceStats(void* context, uint64_t* data, uint32_t count);
+// Releases upload pages of completed frames and empty heap chunks (memory pressure).
+RYUBOX_D12 RyuboxD3D12_TrimIdleMemory(void* context, uint64_t* releasedBytes);
 // Versioned additive diagnostics; does not change GetInfo's ABI.
 struct RyuboxD3D12DescriptorStats
 {

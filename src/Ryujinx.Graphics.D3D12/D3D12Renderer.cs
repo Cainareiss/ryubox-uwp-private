@@ -220,6 +220,23 @@ public sealed unsafe class D3D12Renderer : IRenderer
         catch { Device.Dispose(); throw; }
         Pipeline = new D3D12Pipeline(this); Window = new D3D12Window(this, width, height);
         Watchdog = new D3D12GpuWatchdog(this);
+        RuntimeMemoryBudget.TrimRequested += OnMemoryTrimRequested;
+    }
+
+    private void OnMemoryTrimRequested(MemoryPressure pressure)
+    {
+        if (pressure < MemoryPressure.High || _disposed || _disposing) return;
+        try
+        {
+            ulong released = Device.TrimIdleMemory();
+            Ryujinx.Common.Logging.RuntimeDiagnosticLog.Write("memory-trim",
+                $"d3d12 pressure={pressure} releasedUploadBytes={released}");
+        }
+        catch (Exception error)
+        {
+            // Trimming is best-effort; never escalate pressure into a fault.
+            Ryujinx.Common.Logging.RuntimeDiagnosticLog.Write("memory-trim", $"d3d12 trim failed: {error.Message}");
+        }
     }
 
     public static D3D12Renderer FromFrontendLease(nint context, string spirvCrossLibrary)
@@ -768,6 +785,7 @@ public sealed unsafe class D3D12Renderer : IRenderer
         storageBufferOffsetAlignment: 16, textureBufferOffsetAlignment: 16, gatherBiasPrecision: 0, maximumGpuMemory: 512UL * 1024 * 1024);
     public void Dispose()
     {
+        RuntimeMemoryBudget.TrimRequested -= OnMemoryTrimRequested;
         if (_disposed) return;
         lock (_programLock)
         {

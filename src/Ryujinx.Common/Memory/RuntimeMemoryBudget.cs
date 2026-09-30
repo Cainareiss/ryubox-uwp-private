@@ -128,9 +128,11 @@ namespace Ryujinx.Common.Memory
 
             Interlocked.Exchange(ref _limit, useful);
             Interlocked.Exchange(ref _expectedLimit, expected);
-            _limitSource = appMemoryLimit > 0 || expectedAppMemoryLimit > 0
-                ? "min(host-reported,expected,5GiB)"
-                : "conservative-5GiB";
+            _limitSource = appMemoryLimit > 0
+                ? (useful < fallback ? "host-reported" : "host-reported-capped-5GiB")
+                : expectedAppMemoryLimit > 0 ? "expected-only" : "conservative-5GiB";
+            Logging.RuntimeDiagnosticLog.Write("memory-budget",
+                $"reported={appMemoryLimit} expected={expectedAppMemoryLimit} effective={useful} source={_limitSource}");
             Refresh();
         }
 
@@ -163,8 +165,9 @@ namespace Ryujinx.Common.Memory
             if (bytes == 0) return;
             // This runs under kernel memory locks: do not call Refresh/trim
             // callbacks here, as subscribers can acquire unrelated GPU locks.
-            using Process process = Process.GetCurrentProcess();
-            long used = Math.Max(process.PrivateMemorySize64, Environment.WorkingSet);
+            // Use the 100 ms admission cache instead of creating a Process
+            // object (and its kernel queries) for every guest commit.
+            long used = GetEffectiveUsageNoTrim();
             if (!CanAdmitGuestCommit(used, Limit, bytes))
             {
                 throw new OutOfMemoryException(

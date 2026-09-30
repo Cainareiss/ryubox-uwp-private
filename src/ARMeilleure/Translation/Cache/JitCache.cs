@@ -27,7 +27,12 @@ namespace ARMeilleure.Translation.Cache
         private static readonly int _pageMask = _pageSize - 1;
 
         private const int CodeAlignment = 4; // Bytes.
-        private const uint CacheSize = 256 * 1024 * 1024;
+        private const uint LegacyRegionSize = 256 * 1024 * 1024;
+        // Region granularity (MiB, 64..256, multiple of 16) read once per process
+        // from "Ryujinx.Uwp.JitCacheRegionMiB". Smaller regions commit/reserve
+        // in finer steps; region counts are scaled so total capacity is unchanged.
+        private static readonly uint CacheSize = GetConfiguredRegionSize();
+        private static int RegionScale => (int)(LegacyRegionSize / CacheSize);
         private const int DefaultMaxRegions = 2;
 
         private readonly JitCacheInvalidation _jitCacheInvalidator;
@@ -248,7 +253,7 @@ namespace ARMeilleure.Translation.Cache
             // Reservation leaves process headroom; physical commitment is
             // checked separately for each expansion by CommitAllocation.
             long effectiveUsage = RuntimeMemoryBudget.GetEffectiveUsageNoTrim();
-            if (_jitRegions.Count >= DefaultMaxRegions &&
+            if (_jitRegions.Count >= DefaultMaxRegions * RegionScale &&
                 !CanGrowWithinBudget(effectiveUsage, RuntimeMemoryBudget.Limit))
             {
                 _allocationFailures++;
@@ -356,15 +361,28 @@ namespace ARMeilleure.Translation.Cache
             object configured = AppContext.GetData("Ryujinx.Uwp.JitCacheMaxRegions");
             if (configured is int configuredInteger)
             {
-                return Math.Clamp(configuredInteger, DefaultMaxRegions, 8);
+                return Math.Clamp(configuredInteger, DefaultMaxRegions, 8) * RegionScale;
             }
 
             if (configured is string configuredText && int.TryParse(configuredText, out int configuredValue))
             {
-                return Math.Clamp(configuredValue, DefaultMaxRegions, 8);
+                return Math.Clamp(configuredValue, DefaultMaxRegions, 8) * RegionScale;
             }
 
-            return DefaultMaxRegions;
+            return DefaultMaxRegions * RegionScale;
+        }
+
+        private static uint GetConfiguredRegionSize()
+        {
+            object configured = AppContext.GetData("Ryujinx.Uwp.JitCacheRegionMiB");
+            int mib = configured switch
+            {
+                int value => value,
+                string text when int.TryParse(text, out int parsed) => parsed,
+                _ => 256,
+            };
+            // Only exact divisors of 256 MiB keep capacity scaling exact.
+            return mib is 64 or 128 ? (uint)mib * 1024 * 1024 : LegacyRegionSize;
         }
 
         private void Add(int offset, int size, UnwindInfo unwindInfo)

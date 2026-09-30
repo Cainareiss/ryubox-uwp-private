@@ -119,6 +119,16 @@ public sealed unsafe partial class D3D12NativeDevice : IDisposable
     [DllImport("Ryujinx.Uwp.Native.dll", EntryPoint = "RyuboxD3D12_GetResourceStats", CallingConvention = CallingConvention.StdCall)]
     private static extern int GetResourceStatsNative(DeviceHandle context, ulong* data, uint count);
 
+    [DllImport("Ryujinx.Uwp.Native.dll", EntryPoint = "RyuboxD3D12_TrimIdleMemory", CallingConvention = CallingConvention.StdCall)]
+    private static extern int TrimIdleMemoryNative(DeviceHandle context, out ulong releasedBytes);
+
+    /// <summary>Thread-safe (native context mutex). Returns released upload bytes.</summary>
+    public ulong TrimIdleMemory()
+    {
+        Check(TrimIdleMemoryNative(_handle, out ulong released));
+        return released;
+    }
+
     public ulong[] GetResourceStats()
     {
         var values = new ulong[9];

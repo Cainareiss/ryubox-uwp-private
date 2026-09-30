@@ -10,7 +10,23 @@
     <InvariantGlobalization>false</InvariantGlobalization>
     <StripSymbols>false</StripSymbols>
     <IlcOptimizationPreference>Speed</IlcOptimizationPreference>
+    <!--
+      Xbox Series S Dev Mode caps the whole process at ~5 GiB. Background GC
+      keeps extra segments alive and RetainVM hides freed memory from the OS
+      quota, so prefer a compact, non-concurrent workstation GC.
+    -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
+    <RetainVMGarbageCollection>false</RetainVMGarbageCollection>
+    <!-- Optional hard cap for the managed heap (bytes, 0 = disabled). -->
+    <RyuboxGCHeapHardLimit Condition="'$(RyuboxGCHeapHardLimit)' == ''">0</RyuboxGCHeapHardLimit>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- 0-9: higher values compact more aggressively to reduce fragmentation. -->
+    <RuntimeHostConfigurationOption Include="System.GC.ConserveMemory" Value="5" />
+    <RuntimeHostConfigurationOption Include="System.GC.HeapHardLimit" Value="$(RyuboxGCHeapHardLimit)" Condition="'$(RyuboxGCHeapHardLimit)' != '0'" />
+  </ItemGroup>
 
   <ItemGroup>
     <!-- Desktop Avalonia configuration bridge is not part of the NativeAOT UWP host. -->

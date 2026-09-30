@@ -1248,6 +1248,19 @@ public:
         uploadBytes -= released;
     }
 
+    UINT64 TrimIdleUploads()
+    {
+        // Called under context.mutex. Only slots whose submitted work has
+        // completed are released; the current slot may be recording.
+        if (!fence) return 0;
+        UINT64 completed = fence->GetCompletedValue();
+        if (completed == UINT64_MAX) return 0;
+        UINT64 before = uploadBytes;
+        for (UINT i = 0; i < FrameCount; ++i)
+            if (i != frameIndex && frames[i].fence <= completed) TrimUploadPages(frames[i]);
+        return before - uploadBytes;
+    }
+
     static bool IsPlanarDepthStencil(DXGI_FORMAT format)
     {
         switch (format)
@@ -2836,6 +2849,14 @@ RYUBOX_D12 RyuboxD3D12_GetResourceStats(void* c,uint64_t* data,uint32_t count)
         data[6]=ctx.shaderCompilations; data[7]=ctx.pipelineCreations;
         data[8]=ctx.LiveBytes();
     },true);
+}
+RYUBOX_D12 RyuboxD3D12_TrimIdleMemory(void* c, uint64_t* releasedBytes)
+{
+    return Invoke(c,[&](Context& ctx) {
+        UINT64 released = ctx.TrimIdleUploads();
+        ctx.CollectChunks();
+        if (releasedBytes) *releasedBytes = released;
+    });
 }
 RYUBOX_D12 RyuboxD3D12_GetDescriptorStats(void* c, RyuboxD3D12DescriptorStats* stats)
 {
