@@ -3,6 +3,7 @@ using Ryujinx.HLE.HOS.Kernel.Process;
 using Ryujinx.Horizon.Common;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 
 namespace Ryujinx.HLE.HOS.Kernel.Threading
@@ -15,7 +16,6 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
 
         private readonly Dictionary<ulong, List<KThread>> _condVarThreads;
         private readonly Dictionary<ulong, List<KThread>> _arbiterThreads;
-        private readonly ByDynamicPriority _byDynamicPriority;
 
         public KAddressArbiter(KernelContext context)
         {
@@ -23,7 +23,6 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
 
             _condVarThreads = [];
             _arbiterThreads = [];
-            _byDynamicPriority = new ByDynamicPriority();
         }
 
         public Result ArbitrateLock(int ownerHandle, ulong mutexAddress, int requesterHandle)
@@ -142,15 +141,11 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
 
             if (_condVarThreads.TryGetValue(condVarAddress, out List<KThread> threads))
             {
-                int i = 0;
-
-                if (threads.Count > 0)
-                {
-                    i = threads.BinarySearch(currentThread, _byDynamicPriority);
-                    if (i < 0) i = ~i;
-                }
-                
-                threads.Insert(i, currentThread);
+                // Keep insertion order. Dynamic priority may change while the
+                // thread waits due to priority inheritance, so a list sorted
+                // only here becomes stale. WakeThreads performs the stable
+                // priority selection using the current values.
+                threads.Add(currentThread);
             }
             else
             {
@@ -332,15 +327,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
                 
                 if (_arbiterThreads.TryGetValue(address, out List<KThread> threads))
                 {
-                    int i = 0;
-
-                    if (threads.Count > 0)
-                    {
-                        i = threads.BinarySearch(currentThread, _byDynamicPriority);
-                        if (i < 0) i = ~i;
-                    }
-                
-                    threads.Insert(i, currentThread);
+                    threads.Add(currentThread);
                 }
                 else
                 {
@@ -424,15 +411,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
                 
                 if (_arbiterThreads.TryGetValue(address, out List<KThread> threads))
                 {
-                    int i = 0;
-
-                    if (threads.Count > 0)
-                    {
-                        i = threads.BinarySearch(currentThread, _byDynamicPriority);
-                        if (i < 0) i = ~i;
-                    }
-                
-                    threads.Insert(i, currentThread);
+                    threads.Add(currentThread);
                 }
                 else
                 {
@@ -615,25 +594,27 @@ namespace Ryujinx.HLE.HOS.Kernel.Threading
             int count,
             Action<KThread> removeCallback)
         {
-            int validCount = count > 0 ? Math.Min(count, threads.Count) : threads.Count;
+            // DynamicPriority is mutable while a thread is waiting. Sort at the
+            // signal point, as Canary 1.3.183 did, and preserve FIFO among equal
+            // priorities.
+            KThread[] toSignal = SelectThreadsToSignal(threads, count, thread => thread.DynamicPriority);
 
-            for (int i = 0; i < validCount; i++)
+            foreach (KThread thread in toSignal)
             {
-                KThread thread = threads[i];
                 removeCallback(thread);
+                threads.Remove(thread);
             }
-            
-            threads.RemoveRange(0, validCount);
 
-            return validCount;
+            return toSignal.Length;
         }
-        
-        private class ByDynamicPriority : IComparer<KThread>
+
+        internal static T[] SelectThreadsToSignal<T>(
+            IEnumerable<T> threads,
+            int count,
+            Func<T, int> prioritySelector)
         {
-            public int Compare(KThread x, KThread y)
-            {
-                return x!.DynamicPriority.CompareTo(y!.DynamicPriority);
-            }
+            IOrderedEnumerable<T> candidates = threads.OrderBy(prioritySelector);
+            return (count > 0 ? candidates.Take(count) : candidates).ToArray();
         }
     }
 }

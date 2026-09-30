@@ -12,7 +12,7 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
     /// <summary>
     /// Base class that generates the graphics for the software keyboard applet during inline mode.
     /// </summary>
-    internal class SoftwareKeyboardRendererBase
+    internal class SoftwareKeyboardRendererBase : IKeyboardSurface
     {
         public const int TextBoxBlinkThreshold = 8;
 
@@ -168,7 +168,7 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
 
         private static SKBitmap LoadResource(Assembly assembly, string resourcePath, int newWidth, int newHeight)
         {
-            Stream resourceStream = assembly.GetManifestResourceStream(resourcePath);
+            using Stream resourceStream = assembly.GetManifestResourceStream(resourcePath);
 
             return LoadResource(resourceStream, newWidth, newHeight);
         }
@@ -613,6 +613,19 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
                 _bufferData = buffer;
 
                 Debug.Assert(buffer.Length == _surfaceInfo.Size);
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_bufferLock)
+            {
+                _bufferData = null;
+                _surface?.Dispose(); _surface = null;
+                _ryujinxLogo?.Dispose(); _padAcceptIcon?.Dispose(); _padCancelIcon?.Dispose(); _keyModeIcon?.Dispose();
+                _panelBrush?.Dispose(); _disabledBrush?.Dispose(); _cursorBrush?.Dispose(); _selectionBoxBrush?.Dispose();
+                _textBoxOutlinePen?.Dispose(); _cursorPen?.Dispose(); _selectionBoxPen?.Dispose(); _padPressedPen?.Dispose();
+                _messageFont?.Dispose(); _inputTextFont?.Dispose(); _labelsTextFont?.Dispose();
             }
         }
 

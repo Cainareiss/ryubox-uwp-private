@@ -2,6 +2,7 @@ using System;
 using System.Runtime.InteropServices;
 using Ryujinx.Common.Memory;
 using Ryujinx.Graphics.GAL;
+using Ryujinx.Graphics.Shader;
 
 namespace Ryujinx.Graphics.D3D12;
 
@@ -14,6 +15,8 @@ public sealed class D3D12GalTexture : ITexture
     }
     private readonly D3D12Renderer _renderer;
     private readonly TextureCreateInfo _info;
+    private readonly int _firstLayer;
+    private readonly int _firstLevel;
     // D3D12_SHADER_COMPONENT_MAPPING_ALWAYS_SET_BIT_AVOIDING_ZEROMEM_MISTAKES.
     // Keep the ABI value here so GAL views can select a real SRV swizzle.
     private const uint ComponentMappingAlwaysSet = 1u << 12;
@@ -22,14 +25,32 @@ public sealed class D3D12GalTexture : ITexture
     private Storage _storage;
     private D3D12Texture _native;
     private readonly bool _ownsNativeView;
-    internal D3D12Texture Native { get { ObjectDisposedException.ThrowIf(_storage == null, this); return _native; } }
-    internal uint ComponentMapping { get { _ = Native; return _componentMapping; } }
+    private readonly object _lifetimeLock = new();
+    private bool _released;
+    private int _bindingReferences;
+    private D3D12Buffer _buffer;
+    private BufferRange _bufferRange;
+    internal bool IsBuffer => _info.Target == Target.TextureBuffer;
+    internal D3D12Texture Native
+    {
+        get
+        {
+            ObjectDisposedException.ThrowIf(_storage == null, this);
+            if (IsBuffer) throw new NotSupportedException("A typed buffer cannot be used as a texture attachment.");
+            return _native;
+        }
+    }
+    internal uint ComponentMapping { get { ObjectDisposedException.ThrowIf(_storage == null, this); return _componentMapping; } }
     internal TextureCreateInfo Info => _info;
+    internal string DiagnosticView => IsBuffer
+        ? $"buffer fmt={_info.Format} range={_bufferRange.Offset}+{_bufferRange.Size} map=0x{_componentMapping:X}"
+        : $"id={Native.Id} target={_info.Target} fmt={_info.Format} size={_info.Width}x{_info.Height}x{_info.Depth} mips={_info.Levels} firstMip={_firstLevel} firstLayer={_firstLayer} samples={_info.Samples} map=0x{_componentMapping:X}";
     public int Width => _info.Width;
     public int Height => _info.Height;
     internal D3D12GalTexture(D3D12Renderer renderer, TextureCreateInfo info)
     {
         Validate(info); _renderer = renderer; _info = info; _componentMapping = EncodeComponentMapping(info);
+        if (IsBuffer) { _storage = new(); return; }
         D3D12Texture texture = info.Target == Target.Texture3D
             ? renderer.Device.CreateTexture3D((uint)Width, (uint)Height, (uint)info.Depth, (uint)info.Levels,
                 D3D12TextureFormat.Get(info.Format))
@@ -40,6 +61,7 @@ public sealed class D3D12GalTexture : ITexture
     }
     internal D3D12GalTexture(D3D12GalTexture source, TextureCreateInfo info, int firstLayer, int firstLevel)
     {
+        if (source.IsBuffer) throw new NotSupportedException("Create buffer views with CreateTexture and SetStorage.");
         Validate(info);
         if (!CompatibleStorage(source._info, info))
             throw new NotSupportedException($"D3D12 texture views cannot reinterpret: src(target={source._info.Target}, fmt={source._info.Format}, samples={source._info.Samples}, bpp={source._info.BytesPerPixel}, bw={source._info.BlockWidth}, bh={source._info.BlockHeight}, dsm={source._info.DepthStencilMode}) vs dst(target={info.Target}, fmt={info.Format}, samples={info.Samples}, bpp={info.BytesPerPixel}, bw={info.BlockWidth}, bh={info.BlockHeight}, dsm={info.DepthStencilMode})");
@@ -49,7 +71,9 @@ public sealed class D3D12GalTexture : ITexture
         int viewLayers = info.Target == Target.Texture3D ? info.Depth : info.GetLayers();
         if (firstLayer < 0 || viewLayers <= 0 || firstLayer > sourceLayers - viewLayers)
             throw new ArgumentOutOfRangeException(nameof(firstLayer));
-        _renderer = source._renderer; _info = info; _componentMapping = EncodeComponentMapping(info); _storage = source._storage;
+        _renderer = source._renderer; _info = info; _firstLayer = source._firstLayer + firstLayer;
+        _firstLevel = source._firstLevel + firstLevel;
+        _componentMapping = EncodeComponentMapping(info); _storage = source._storage;
         ObjectDisposedException.ThrowIf(_storage == null, source);
         System.Threading.Interlocked.Increment(ref _storage.References);
         try
@@ -98,6 +122,13 @@ public sealed class D3D12GalTexture : ITexture
     private static void Validate(TextureCreateInfo info)
     {
         var format = D3D12TextureFormat.Get(info.Format);
+        if (info.Target == Target.TextureBuffer)
+        {
+            if (info.Width <= 0 || info.Height != 1 || info.Depth != 1 || info.Levels != 1 ||
+                info.Samples != 1 || info.IsCompressed || format.IsDepth || info.BytesPerPixel != format.Bytes)
+                throw new ArgumentException("Invalid typed-buffer texture description.");
+            return;
+        }
         bool combinedDepthStencil = info.Format is Format.D24UnormS8Uint or Format.S8UintD24Unorm or Format.X8UintD24Unorm;
         if (format.IsDepth && info.DepthStencilMode != DepthStencilMode.Depth && !combinedDepthStencil)
             throw new NotSupportedException("D3D12 depth/stencil textures currently expose their depth view; stencil-only views are not implemented.");
@@ -131,10 +162,31 @@ public sealed class D3D12GalTexture : ITexture
                 $"samples={info.Samples}, format={info.Format}, compressed={info.IsCompressed}, " +
                 $"swizzle={info.SwizzleR}/{info.SwizzleG}/{info.SwizzleB}/{info.SwizzleA}).");
     }
-    internal void CheckOwner(D3D12Renderer renderer)
+    internal void CheckOwner(D3D12Renderer renderer, bool bound = false)
     {
         if (!ReferenceEquals(renderer, _renderer)) throw new ArgumentException("Texture belongs to another renderer.");
-        _ = Native;
+        ObjectDisposedException.ThrowIf(_storage == null || (!bound && _released), this);
+    }
+    internal void ValidateBinding() => ObjectDisposedException.ThrowIf(_storage == null || _released, this);
+    internal void RetainBinding()
+    {
+        lock (_lifetimeLock) { ValidateBinding(); ++_bindingReferences; }
+    }
+    internal void ReleaseBinding()
+    {
+        lock (_lifetimeLock)
+        {
+            if (_bindingReferences > 0) --_bindingReferences;
+            if (_bindingReferences == 0 && _released) Destroy();
+        }
+    }
+    internal D3D12ProgramBinding GetBinding(ShaderStage stage, uint type, uint space, uint binding)
+    {
+        CheckOwner(_renderer, bound: true);
+        if (!IsBuffer) return new(stage, type, space, binding, Native, ComponentMapping: _componentMapping);
+        if (_buffer == null) throw new InvalidOperationException("TextureBuffer requires SetStorage before use.");
+        return new(stage, type, space, binding, _buffer, (ulong)_bufferRange.Offset, (ulong)_bufferRange.Size,
+            ComponentMapping: _componentMapping, Format: D3D12TextureFormat.Get(_info.Format).Dxgi);
     }
     internal D3D12GalTexture CreateRenderTargetSliceView(int firstLayer, int layers)
     {
@@ -168,6 +220,7 @@ public sealed class D3D12GalTexture : ITexture
     public void CopyTo(ITexture destination, int firstLayer, int firstLevel) => CopyTo(destination, 0, firstLayer, 0, firstLevel);
     public void CopyTo(ITexture destination, int srcLayer, int dstLayer, int srcLevel, int dstLevel)
     {
+        CheckOwner(_renderer);
         Subresource(srcLayer, srcLevel);
         var target = _renderer.Texture(destination);
         if (D3D12Pipeline.ProbeTargets)
@@ -175,7 +228,7 @@ public sealed class D3D12GalTexture : ITexture
             try
             {
                 string line = $"[CopyTo Subresource] src={Width}x{Height} fmt={_info.Format} id={Native?.Id} (L{srcLayer},M{srcLevel}) -> dst={target.Width}x{target.Height} fmt={target._info.Format} id={target.Native?.Id} (L{dstLayer},M{dstLevel})\n";
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\draw_targets.txt", line);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "draw_targets.txt"), line);
             }
             catch {}
         }
@@ -186,7 +239,9 @@ public sealed class D3D12GalTexture : ITexture
         int srcH = Math.Max(1, Height >> srcLevel);
         int dstW = Math.Max(1, target.Width >> dstLevel);
         int dstH = Math.Max(1, target.Height >> dstLevel);
-        if (_info.Format != target._info.Format || (_native.Format.IsDepth && (copyWidth != srcW || copyHeight != srcH || copyWidth != dstW || copyHeight != dstH)))
+        if ((_info.Format != target._info.Format &&
+             !D3D12TextureFormat.IsBitwiseSrgbUnormPair(_info.Format, target._info.Format)) ||
+            (_native.Format.IsDepth && (copyWidth != srcW || copyHeight != srcH || copyWidth != dstW || copyHeight != dstH)))
         {
             // The guest can request a copy dependency between differently
             // typed views or partial depth regions. D3D12 CopyTextureRegion correctly rejects that
@@ -206,13 +261,14 @@ public sealed class D3D12GalTexture : ITexture
     }
     public void CopyTo(ITexture destination, Extents2D source, Extents2D target, bool linearFilter)
     {
+        CheckOwner(_renderer);
         var texture = _renderer.Texture(destination);
         if (D3D12Pipeline.ProbeTargets)
         {
             try
             {
                 string line = $"[CopyTo Extents] src={Width}x{Height} fmt={_info.Format} id={Native?.Id} ({source.X1},{source.Y1}-{source.X2},{source.Y2}) -> dst={texture.Width}x{texture.Height} fmt={texture._info.Format} id={texture.Native?.Id} ({target.X1},{target.Y1}-{target.X2},{target.Y2})\n";
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\draw_targets.txt", line);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "draw_targets.txt"), line);
             }
             catch {}
         }
@@ -239,7 +295,9 @@ public sealed class D3D12GalTexture : ITexture
         // not a reason to abort the emulation thread.
         int rowBytes = checked(Math.Max(1, Width >> level) * _info.BytesPerPixel);
         int rows = Math.Max(1, Height >> level);
-        int slices = _info.Target == Target.Texture3D ? Math.Max(1, _info.Depth >> level) : 1;
+        // This overload copies one layer/Z slice, even when the backing
+        // resource is a volume. Match GAL/Vulkan's singleSlice contract.
+        const int slices = 1;
         if (stride <= 0 || stride < rowBytes)
         {
             int copySize = Math.Min(range.Size, source.Length);
@@ -261,6 +319,7 @@ public sealed class D3D12GalTexture : ITexture
     }
     public ITexture CreateView(TextureCreateInfo info, int firstLayer, int firstLevel)
     {
+        CheckOwner(_renderer);
         Validate(info);
         return _renderer.CreateTextureView(this, info, firstLayer, firstLevel);
     }
@@ -414,12 +473,13 @@ public sealed class D3D12GalTexture : ITexture
 
     private void UploadFlatSubresource(ReadOnlySpan<byte> span, int layer, int level)
     {
-        int size = _info.Target == Target.Texture3D ? _info.GetMipSize(level) : _info.GetMipSize2D(level);
+        // SetData(data, layer, level) supplies one slice. Only SetData(data)
+        // uploads the complete volume through UploadFlatAll.
+        int size = _info.GetMipSize2D(level);
         if (span.Length < size) throw new ArgumentException("The mip upload does not contain enough data.", nameof(span));
         int width = Math.Max(1, Width >> level), height = Math.Max(1, Height >> level);
-        int depth = _info.Target == Target.Texture3D ? Math.Max(1, _info.Depth >> level) : 1;
         _renderer.EnsureCommands();
-        _renderer.Device.Upload(Native, (uint)level, 0, 0, (uint)layer, (uint)width, (uint)height, (uint)depth,
+        _renderer.Device.Upload(Native, (uint)level, 0, 0, (uint)layer, (uint)width, (uint)height, 1,
             span[..size], (uint)_info.GetMipStride(level), (uint)_info.GetMipSize2D(level));
     }
 
@@ -466,6 +526,15 @@ public sealed class D3D12GalTexture : ITexture
 
     public PinnedSpan<byte> GetData()
     {
+        CheckOwner(_renderer);
+        if (IsBuffer)
+        {
+            if (_buffer == null) throw new InvalidOperationException("TextureBuffer has no storage.");
+            _renderer.Flush();
+            byte[] bytes = new byte[_bufferRange.Size];
+            _renderer.Device.ReadBuffer(_buffer, (ulong)_bufferRange.Offset, bytes);
+            return D3D12Renderer.Pin(bytes);
+        }
         _renderer.Flush();
         _hasBeenRead = true;
         int size = 0;
@@ -475,25 +544,54 @@ public sealed class D3D12GalTexture : ITexture
         for (int level = 0; level < _info.Levels; ++level)
         {
             int mipSize = _info.GetMipSize(level);
-            byte[] mip = _renderer.Device.ReadTexture(Native, (uint)level, mipSize,
-                (uint)_info.GetMipStride(level), (uint)_info.GetMipSize2D(level));
-            mip.CopyTo(result, offset); offset += mipSize;
+            if (_info.Target == Target.Texture3D || _info.GetLayers() == 1)
+            {
+                byte[] mip = _renderer.Device.ReadTexture(Native, (uint)level, mipSize,
+                    (uint)_info.GetMipStride(level), (uint)_info.GetMipSize2D(level));
+                mip.CopyTo(result, offset);
+            }
+            else
+            {
+                // Native ReadTexture reads the first array slice of its view.
+                // Select each layer explicitly, keeping GAL's mip-major layout.
+                int sliceSize = _info.GetMipSize2D(level);
+                for (int layer = 0; layer < _info.GetLayers(); layer++)
+                    ReadSlice(layer, level).CopyTo(result, offset + layer * sliceSize);
+            }
+            offset += mipSize;
         }
         return D3D12Renderer.Pin(result);
     }
     public PinnedSpan<byte> GetData(int layer, int level)
     {
+        CheckOwner(_renderer);
         Subresource(layer, level);
+        if (IsBuffer) return GetData();
         _renderer.Flush();
         _hasBeenRead = true;
-        int size = _info.GetMipSize(level);
-        return D3D12Renderer.Pin(_renderer.Device.ReadTexture(Native, (uint)level, size,
-            (uint)_info.GetMipStride(level), (uint)_info.GetMipSize2D(level)));
+        return D3D12Renderer.Pin(ReadSlice(layer, level));
+    }
+    private byte[] ReadSlice(int layer, int level)
+    {
+        // A one-mip/one-slice native view selects the physical subresource,
+        // including offsets inherited from a parent view. This also limits
+        // Texture3D readback to one Z slice instead of the complete volume.
+        using var view = _renderer.Device.CreateTextureView(Native, (uint)level, 1,
+            (uint)layer, 1, (uint)Math.Max(1, Width >> level),
+            (uint)Math.Max(1, Height >> level), 1);
+        int size = _info.GetMipSize2D(level);
+        return _renderer.Device.ReadTexture(view, 0, size, (uint)_info.GetMipStride(level), (uint)size);
     }
     public void SetData(MemoryOwner<byte> data)
     {
         using (data)
         {
+            CheckOwner(_renderer);
+            if (IsBuffer)
+            {
+                UploadBufferData(data.Span, 0);
+                return;
+            }
             if (_info.Samples != 1)
             {
                 HandleMsaaSetData(data.Span, 0, 0, null);
@@ -507,7 +605,9 @@ public sealed class D3D12GalTexture : ITexture
     {
         using (data)
         {
+            CheckOwner(_renderer);
             Subresource(layer, level);
+            if (IsBuffer) { UploadBufferData(data.Span, 0); return; }
             if (_info.Samples != 1)
             {
                 HandleMsaaSetData(data.Span, layer, level, null);
@@ -521,7 +621,16 @@ public sealed class D3D12GalTexture : ITexture
     {
         using (data)
         {
+            CheckOwner(_renderer);
             Subresource(layer, level);
+            if (IsBuffer)
+            {
+                if (region.Y != 0 || region.Height != 1 || region.X < 0 || region.Width < 0 ||
+                    region.Width > Width - region.X) throw new ArgumentOutOfRangeException(nameof(region));
+                UploadBufferData(data.Span[..checked(region.Width * _info.BytesPerPixel)],
+                    checked(region.X * _info.BytesPerPixel));
+                return;
+            }
             if (_info.Samples != 1)
             {
                 HandleMsaaSetData(data.Span, layer, level, region);
@@ -531,8 +640,43 @@ public sealed class D3D12GalTexture : ITexture
             _hasBeenUsedBefore = true;
         }
     }
-    public void SetStorage(BufferRange buffer) => throw new NotSupportedException("A non-buffer D3D12 texture cannot be rebound as a buffer texture.");
+    private void UploadBufferData(ReadOnlySpan<byte> data, int offset)
+    {
+        CheckOwner(_renderer);
+        if (_buffer == null) throw new InvalidOperationException("TextureBuffer has no storage.");
+        if (offset < 0 || offset > _bufferRange.Size || data.Length > _bufferRange.Size - offset)
+            throw new ArgumentOutOfRangeException(nameof(data));
+        if (data.IsEmpty) return;
+        _renderer.UploadBuffer(_buffer, (ulong)(_bufferRange.Offset + offset), data);
+    }
+    public void SetStorage(BufferRange buffer)
+    {
+        CheckOwner(_renderer);
+        if (!IsBuffer) throw new NotSupportedException("Only TextureBuffer accepts SetStorage.");
+        var source = _renderer.Buffer(buffer.Handle, buffer.Offset, buffer.Size);
+        int stride = _info.BytesPerPixel;
+        if (buffer.Size <= 0 || buffer.Offset % stride != 0 || buffer.Size % stride != 0)
+            throw new ArgumentException("Typed-buffer range must contain whole format elements.", nameof(buffer));
+        if (_buffer != null && _bufferRange.Equals(buffer)) return;
+        var retained = _renderer.Device.RetainBuffer(source);
+        var previous = _buffer;
+        _buffer = retained;
+        _bufferRange = buffer;
+        previous?.Dispose();
+    }
     public void Release()
+    {
+        lock (_lifetimeLock)
+        {
+            _released = true;
+            if (_bindingReferences == 0) Destroy();
+        }
+    }
+    internal void ForceRelease()
+    {
+        lock (_lifetimeLock) { _released = true; Destroy(); }
+    }
+    private void Destroy()
     {
         var storage = System.Threading.Interlocked.Exchange(ref _storage, null);
         if (storage != null)
@@ -540,7 +684,8 @@ public sealed class D3D12GalTexture : ITexture
             _renderer.ForgetTexture(this);
             if (_ownsNativeView) _native.Dispose();
             _native = null;
-            if (System.Threading.Interlocked.Decrement(ref storage.References) == 0) storage.Texture.Dispose();
+            _buffer?.Dispose(); _buffer = null;
+            if (System.Threading.Interlocked.Decrement(ref storage.References) == 0) storage.Texture?.Dispose();
         }
     }
 }

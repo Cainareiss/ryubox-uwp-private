@@ -51,6 +51,8 @@ namespace ARMeilleure.Instructions
                 nameof(InvalidateCacheLine) => (nint)(delegate* unmanaged<ulong, void>)&InvalidateCacheLine,
                 nameof(CheckSynchronization) => (nint)(delegate* unmanaged<byte>)&CheckSynchronization,
                 nameof(GuestDispatchBoundary) => (nint)(delegate* unmanaged<void>)&GuestDispatchBoundary,
+                nameof(TraceGuestBlock) => (nint)(delegate* unmanaged<ulong, void>)&TraceGuestBlock,
+                nameof(TraceGuestAccess) => (nint)(delegate* unmanaged<ulong, ulong, int, int, void>)&TraceGuestAccess,
                 nameof(AcquirePinnedFunction) => (nint)(delegate* unmanaged<ulong, ulong>)&AcquirePinnedFunction,
                 _ => throw new ArgumentOutOfRangeException(nameof(methodName), methodName, "Unknown native interface method"),
             };
@@ -87,6 +89,18 @@ namespace ARMeilleure.Instructions
         public static void GuestDispatchBoundary()
         {
             Context.Translator.GuestDispatchBoundary(Context.Context.ThreadUid);
+        }
+
+        [UnmanagedCallersOnly]
+        public static void TraceGuestBlock(ulong address)
+        {
+            Context.Translator.TraceGuestBlock(address, Context.Context, Context.Memory);
+        }
+
+        [UnmanagedCallersOnly]
+        public static void TraceGuestAccess(ulong pc, ulong address, int size, int write)
+        {
+            Context.Translator.TraceGuestAccess(pc, address, size, write != 0);
         }
 
         [UnmanagedCallersOnly]

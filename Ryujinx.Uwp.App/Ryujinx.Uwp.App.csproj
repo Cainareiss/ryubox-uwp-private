@@ -49,6 +49,8 @@
   <PropertyGroup>
     <NativeHostBinary Condition="'$(NativeHostBinary)' == ''">$(MSBuildProjectDirectory)\..\Ryujinx.Uwp.Native\bin\x64\$(Configuration)\Ryujinx.Uwp.Native.dll</NativeHostBinary>
     <CoreHostBinary Condition="'$(CoreHostBinary)' == ''">$(MSBuildProjectDirectory)\..\Ryujinx.Uwp.CoreHost\bin\$(Configuration)\net10.0\win-x64\publish\Ryujinx.Uwp.CoreHost.dll</CoreHostBinary>
+    <CoreHostRuntimeDirectory Condition="'$(CoreHostRuntimeDirectory)' == ''">$([System.IO.Path]::GetDirectoryName('$(CoreHostBinary)'))</CoreHostRuntimeDirectory>
+    <SkiaSharpNativeBinary Condition="'$(SkiaSharpNativeBinary)' == ''">$(CoreHostRuntimeDirectory)\libSkiaSharp.dll</SkiaSharpNativeBinary>
     <MesaStageDirectory Condition="'$(MesaStageDirectory)' == ''">$(MSBuildProjectDirectory)\..\..\artifacts\xbox\MesaDozenHeadlessXbox</MesaStageDirectory>
     <IncludeMesaDozen Condition="'$(IncludeMesaDozen)' == ''">false</IncludeMesaDozen>
     <SpirvCrossBinary Condition="'$(SpirvCrossBinary)' == ''">$(MSBuildProjectDirectory)\..\..\third_party\SPIRV-Cross\build-uwp-x64-msbuild\spirv-cross-c-shared.dll</SpirvCrossBinary>
@@ -73,6 +75,13 @@
     <Compile Include="UwpImGuiFrontendCoordinator.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
+
+  <Target Name="ValidateSpirvCrossBinaryForPackage" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(SpirvCrossBinary)')"
+           Text="Required runtime dependency missing: spirv-cross-c-shared.dll. Set SpirvCrossBinary to the UWP-compatible DLL before building the Xbox/MSIX package." />
+    <Error Condition="!Exists('$(SkiaSharpNativeBinary)')"
+           Text="Required CoreHost runtime dependency missing: libSkiaSharp.dll. Publish Ryujinx.Uwp.CoreHost for win-x64 before building the Xbox/MSIX package." />
+  </Target>
 
   <ItemGroup>
     <ApplicationDefinition Include="App.xaml">
@@ -107,6 +116,10 @@
     </Content>
     <Content Include="$(CoreHostBinary)" Condition="Exists('$(CoreHostBinary)')">
       <Link>Ryujinx.Uwp.CoreHost.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(SkiaSharpNativeBinary)" Condition="Exists('$(SkiaSharpNativeBinary)')">
+      <Link>libSkiaSharp.dll</Link>
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="$(SpirvCrossBinary)" Condition="Exists('$(SpirvCrossBinary)')">

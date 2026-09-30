@@ -55,6 +55,12 @@ public struct D3D12PerformanceStats
     public ulong PsoMicroseconds, DescriptorBindMicroseconds, RecordMicroseconds;
     public ulong SubmitMicroseconds, PresentMicroseconds, FenceWaitMicroseconds;
     public ulong DepthAttachmentsDetached, InvalidRenderPasses, UavBarriers;
+    public ulong DescriptorTableCacheHits, DescriptorTableCacheMisses, DescriptorCopies;
+    public ulong PresentAttempts, PresentSuccess;
+    public ulong LastPresentFence, LastPresentQpc;
+    public int LastPresentResult;
+    public uint LastPresentWidth, LastPresentHeight;
+    public uint PresentationTarget, Reserved;
 }
 
 /// <summary>
@@ -84,7 +90,7 @@ public sealed unsafe partial class D3D12NativeDevice : IDisposable
     {
         var stats = new D3D12PerformanceStats { Size = (uint)sizeof(D3D12PerformanceStats) };
         Check(GetPerformanceStatsNative(_handle, ref stats));
-        if (stats.Version != 1) throw new NotSupportedException($"Performance statistics ABI {stats.Version} is not supported.");
+        if (stats.Version != 3) throw new NotSupportedException($"Performance statistics ABI {stats.Version} is not supported.");
         return stats;
     }
     public string GetDiagnosticMessage()
@@ -161,6 +167,12 @@ public sealed unsafe partial class D3D12NativeDevice : IDisposable
     {
         Check(Native.CreateBuffer(_handle, bytes, out ulong id));
         return new D3D12Buffer(this, id, bytes);
+    }
+
+    internal D3D12Buffer RetainBuffer(D3D12Buffer source)
+    {
+        Check(Native.RetainBuffer(_handle, Validate(source), out ulong id));
+        return new D3D12Buffer(this, id, source.Size);
     }
 
     public D3D12Texture CreateTextureRgba8(uint width, uint height)
@@ -255,6 +267,12 @@ public sealed unsafe partial class D3D12NativeDevice : IDisposable
         fixed (byte* pointer = destination) Check(Native.ReadBuffer(_handle, id, offset, pointer, (ulong)destination.Length));
     }
 
+    public void ReadSubmittedBuffer(D3D12Buffer buffer, ulong offset, Span<byte> destination)
+    {
+        ulong id = Validate(buffer);
+        fixed (byte* pointer = destination) Check(Native.ReadSubmittedBuffer(_handle, id, offset, pointer, (ulong)destination.Length));
+    }
+
     /// <summary>Explicit, synchronous readback for tests/screenshots only.</summary>
     public byte[] CaptureRgba8()
     {
@@ -339,6 +357,8 @@ public sealed unsafe partial class D3D12NativeDevice : IDisposable
         internal static extern int SetCompositionScale(DeviceHandle context, float x, float y);
         [DllImport(Library, EntryPoint = "RyuboxD3D12_CreateBuffer", CallingConvention = CallingConvention.StdCall)]
         internal static extern int CreateBuffer(DeviceHandle context, ulong bytes, out ulong resource);
+        [DllImport(Library, EntryPoint = "RyuboxD3D12_RetainBuffer", CallingConvention = CallingConvention.StdCall)]
+        internal static extern int RetainBuffer(DeviceHandle context, ulong source, out ulong resource);
         [DllImport(Library, EntryPoint = "RyuboxD3D12_CreateTextureRgba8", CallingConvention = CallingConvention.StdCall)]
         internal static extern int CreateTextureRgba8(DeviceHandle context, uint width, uint height, out ulong resource);
         [DllImport(Library, EntryPoint = "RyuboxD3D12_CreateColorTexture", CallingConvention = CallingConvention.StdCall)]
@@ -377,6 +397,8 @@ public sealed unsafe partial class D3D12NativeDevice : IDisposable
         internal static extern int DrawTexture(DeviceHandle context, ulong resource, float left, float top, float right, float bottom, uint flip);
         [DllImport(Library, EntryPoint = "RyuboxD3D12_ReadBuffer", CallingConvention = CallingConvention.StdCall)]
         internal static extern int ReadBuffer(DeviceHandle context, ulong resource, ulong offset, void* data, ulong bytes);
+        [DllImport(Library, EntryPoint = "RyuboxD3D12_ReadSubmittedBuffer", CallingConvention = CallingConvention.StdCall)]
+        internal static extern int ReadSubmittedBuffer(DeviceHandle context, ulong resource, ulong offset, void* data, ulong bytes);
         [DllImport(Library, EntryPoint = "RyuboxD3D12_Capture", CallingConvention = CallingConvention.StdCall)]
         internal static extern int Capture(DeviceHandle context, void* data, ulong bytes);
         [DllImport(Library, EntryPoint = "RyuboxD3D12_GetLastDiagnostic", CallingConvention = CallingConvention.StdCall)]

@@ -24,6 +24,7 @@ UiInput Convert(const FrameInput& input) noexcept
 		.start = input.menu,
 	};
 }
+}
 
 UiInputEvents UiInputTracker::Update(const FrameInput& frame) noexcept
 {

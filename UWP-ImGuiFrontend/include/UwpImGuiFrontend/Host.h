@@ -32,6 +32,9 @@ public:
 	virtual void StopVideoPlayback() {}
 	virtual bool RequestLaunch(ItemId item) = 0;
 	virtual void OpenContextMenu(ItemId item) = 0;
+	// X toggles the selected title without opening a modal. Hosts that do not
+	// persist favourites may decline and leave the catalogue unchanged.
+	virtual bool ToggleFavorite(ItemId) { return false; }
 	virtual void Execute(HostCommand command) = 0;
 	virtual void DrawSettingsPage(std::string_view pageId) = 0;
 	virtual void OpenUri(std::string_view uri) = 0;

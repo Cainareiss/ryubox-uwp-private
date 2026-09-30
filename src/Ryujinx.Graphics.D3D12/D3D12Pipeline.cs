@@ -15,6 +15,7 @@ public sealed unsafe class D3D12Pipeline : IPipeline
     private D3D12Program _program;
     private D3D12GalTexture _target;
     private D3D12GalTexture[] _colorTargets = [];
+    private readonly D3D12Texture[] _attachmentProxies = new D3D12Texture[8];
     private BufferRange _index;
     private IndexType _indexType;
     private VertexAttribDescriptor[] _attributes = [];
@@ -78,6 +79,7 @@ public sealed unsafe class D3D12Pipeline : IPipeline
     }
     public void ClearRenderTargetColor(int index, int layer, int layers, uint mask, ColorF color)
     {
+        if ((mask & ~15u) != 0) throw new ArgumentOutOfRangeException(nameof(mask));
         if ((uint)index >= (uint)Math.Max(1, _colorTargets.Length)) throw new ArgumentOutOfRangeException(nameof(index));
         D3D12GalTexture target = _colorTargets.Length == 0 ? null : _colorTargets[index];
         // Match DrawProgram's implicit backbuffer convention. Explicit null
@@ -90,7 +92,13 @@ public sealed unsafe class D3D12Pipeline : IPipeline
             return;
         }
 
-        if (layer == 0 && layers == 1)
+        int availableLayers = target.Info.Target == Target.Texture3D ? target.Info.Depth : target.Info.GetLayers();
+        if (layer < 0 || layers <= 0 || layer > availableLayers - layers)
+            throw new ArgumentOutOfRangeException(nameof(layer));
+        if (mask == 0) return;
+        // Layer zero is still a single-slice view when the backing texture
+        // contains multiple slices. Clearing the original RTV clears them all.
+        if (layer == 0 && layers == 1 && availableLayers == 1)
         {
             _renderer.ClearColorChannels(target, mask, color);
             return;
@@ -206,7 +214,7 @@ public sealed unsafe class D3D12Pipeline : IPipeline
                     if (array != null)
                     {
                         if (array.Textures == null || array.Samplers == null) throw new ObjectDisposedException(nameof(array));
-                        if (b.Type != 3) texture = _renderer.Texture(array.Textures[index]);
+                        if (b.Type != 3) texture = array.Textures[index] == null ? null : _renderer.Texture(array.Textures[index], bound: true);
                         else sampler = array.Samplers[index] as D3D12Sampler;
                     }
                     if (b.Type == 1 || b.Space == 3)
@@ -218,7 +226,7 @@ public sealed unsafe class D3D12Pipeline : IPipeline
                         if (images != null)
                         {
                             if (images.Images == null) throw new ObjectDisposedException(nameof(images));
-                            texture = _renderer.Texture(images.Images[imageIndex]);
+                            texture = images.Images[imageIndex] == null ? null : _renderer.Texture(images.Images[imageIndex], bound: true);
                         }
                     }
                     if (b.Type == 3)
@@ -233,9 +241,9 @@ public sealed unsafe class D3D12Pipeline : IPipeline
                         // Texture swizzles are a view property. The native layer
                         // encodes this mapping in the SRV rather than changing the
                         // underlying guest texture bytes.
-                        result.Add(new(stage, b.Type, b.Space, (uint)binding, texture.Native,
-                            ComponentMapping: texture.ComponentMapping));
+                        result.Add(texture.GetBinding(stage, b.Type, b.Space, (uint)binding));
                         if (texMissed) diagLines?.AppendLine($"  SRV MISS: stage={stage} space={b.Space} binding={binding}");
+                        else diagLines?.AppendLine($"  SRV OK:   stage={stage} space={b.Space} binding={binding} {texture.DiagnosticView}");
                     }
                 }
             }
@@ -259,6 +267,17 @@ public sealed unsafe class D3D12Pipeline : IPipeline
     private readonly HashSet<(Format Format, int Phase)> _targetProbes = new();
     internal static readonly bool ProbeTargets = Environment.GetEnvironmentVariable("RYUBOX_D3D12_PROBE_TARGETS") == "1";
     internal static readonly bool BindingDiag = Environment.GetEnvironmentVariable("RYUBOX_D3D12_BINDING_DIAG") == "1";
+    private static readonly int BindingDiagStartDraw =
+        int.TryParse(Environment.GetEnvironmentVariable("RYUBOX_D3D12_BINDING_DIAG_START_DRAW"), out int startDraw)
+            ? Math.Max(0, startDraw) : 0;
+    private static readonly int BindingDiagWindowDraws =
+        int.TryParse(Environment.GetEnvironmentVariable("RYUBOX_D3D12_BINDING_DIAG_WINDOW_DRAWS"), out int windowDraws)
+            ? Math.Clamp(windowDraws, 0, 256) : 0;
+    // Diagnostic A/B only: leave the original color target bound and let the
+    // native renderer omit an incompatible DSV for this draw. Never change
+    // the default path based on a single title without comparing captures.
+    private static readonly bool DiagnosticSkipAttachmentProxy =
+        Environment.GetEnvironmentVariable("RYUBOX_D3D12_DIAG_SKIP_ATTACHMENT_PROXY") == "1";
     private readonly HashSet<D3D12Program> _bindingDiagPrograms = new();
     internal static readonly string LogDir = ResolveLogDir();
 
@@ -434,14 +453,16 @@ public sealed unsafe class D3D12Pipeline : IPipeline
             var vertices = vertexList.ToArray();
             // A splash can repeat one shader thousands of times. Sample distinct
             // programs instead of exhausting the diagnostic budget on that splash.
-            bool doDiag = BindingDiag && _bindingDiagPrograms.Count < 128 &&
+            bool doDiag = BindingDiag && ec >= BindingDiagStartDraw && _bindingDiagPrograms.Count < 128 &&
                 _bindingDiagPrograms.Add(_program);
-            if (doDiag)
+            bool logBindingWindow = BindingDiag && BindingDiagWindowDraws > 0 &&
+                ec >= BindingDiagStartDraw && ec - BindingDiagStartDraw < BindingDiagWindowDraws;
+            if (doDiag || logBindingWindow)
             {
                 string hdr = $"\n[Draw #{ec}] target={_target?.Width}x{_target?.Height} prog={_program.GetHashCode():X8}\n";
                 try { System.IO.File.AppendAllText(System.IO.Path.Combine(LogDir, "binding_diag.txt"), hdr); } catch { }
             }
-            var bindings = Bindings(doDiag);
+            var bindings = Bindings(doDiag || logBindingWindow);
             if (doDiag)
             {
                 // Bounded, opt-in readback: distinguish a resolved descriptor
@@ -495,6 +516,8 @@ public sealed unsafe class D3D12Pipeline : IPipeline
                     Logger.Warning?.Print(LogClass.Gpu, $"D3D12 binding diagnostic failed: {ex.Message}");
                 }
             }
+            uint proxyMask = DiagnosticSkipAttachmentProxy ? 0 : PrepareAttachmentProxies(ref draw);
+            if (proxyMask != 0) System.Threading.Interlocked.Increment(ref _attachmentProxyDraws);
             _renderer.ReserveDescriptors(_program, draw.ColorTargetCount != 0, _depthTarget != null);
             _renderer.BeforeGuestDraw(_feedback);
             fixed (NativeVertexBuffer* v = vertices)
@@ -505,6 +528,12 @@ public sealed unsafe class D3D12Pipeline : IPipeline
                 depth.Target = _depthTarget == null ? 0 : _renderer.Device.ResourceId(_depthTarget.Native);
                 depth.NoColorTarget = draw.ColorTargetCount == 0 && _depthTarget != null ? 1u : 0u;
                 _renderer.Device.Draw(_program, bindings, ref draw, depth);
+            }
+            for (int i = 0; i < _attachmentProxies.Length; i++)
+            {
+                if ((proxyMask & (1u << i)) == 0) continue;
+                var proxy = _attachmentProxies[i];
+                _renderer.Device.CopyTexture(proxy, _colorTargets[i].Native, 0, 0, 0, 0, proxy.Width, proxy.Height);
             }
             if (ProbeTargets && _target != null && _target.Width >= 1280 && _target.Height >= 720)
             {
@@ -668,13 +697,32 @@ public sealed unsafe class D3D12Pipeline : IPipeline
         // color target. Throwing here was incorrect — log a one-time diagnostic instead.
         if (depthTexture != null && color != null && (color.Width != depthTexture.Width || color.Height != depthTexture.Height))
         {
-            try
+            // Sample at powers of two; this path fires on nearly every draw in
+            // some titles and previously wrote tens of MB of repeated text.
+            long mismatch = ++_targetDimensionMismatchCount;
+            if (mismatch <= 4 || (mismatch & (mismatch - 1)) == 0)
             {
-                string mismatchLine = $"[SetRenderTargets] Dimension mismatch (allowed): color={color.Width}x{color.Height} depth={depthTexture.Width}x{depthTexture.Height}\n";
-                System.IO.File.AppendAllText(System.IO.Path.Combine(LogDir, "draw_targets.txt"), mismatchLine);
+                try
+                {
+                    string mismatchLine = $"[SetRenderTargets] Dimension mismatch sample={mismatch}: color={color.Width}x{color.Height} depth={depthTexture.Width}x{depthTexture.Height}\n";
+                    System.IO.File.AppendAllText(System.IO.Path.Combine(LogDir, "draw_targets.txt"), mismatchLine);
+                }
+                catch { }
             }
-            catch { }
         }
+        int retained = 0;
+        try
+        {
+            foreach (var target in targets) { target?.RetainBinding(); ++retained; }
+            depthTexture?.RetainBinding();
+        }
+        catch
+        {
+            for (int i = 0; i < retained; ++i) targets[i]?.ReleaseBinding();
+            throw;
+        }
+        foreach (var target in _colorTargets) target?.ReleaseBinding();
+        _depthTarget?.ReleaseBinding();
         _colorTargets = targets; _target = color; _depthTarget = depthTexture;
         if (ProbeTargets && color != _lastReportedTarget)
         {
@@ -684,12 +732,23 @@ public sealed unsafe class D3D12Pipeline : IPipeline
                 string targetDesc = color != null ? $"{color.Width}x{color.Height} fmt={color.Info.Format} id={color.Native?.Id}" : "null";
                 string depthDesc = depthTexture != null ? $"{depthTexture.Width}x{depthTexture.Height} fmt={depthTexture.Info.Format} id={depthTexture.Native?.Id}" : "null";
                 string line = $"[SetRenderTarget] target={targetDesc}, depth={depthDesc}\n";
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\draw_targets.txt", line);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "draw_targets.txt"), line);
             }
             catch {}
         }
     }
     private D3D12GalTexture _lastReportedTarget;
+    private long _targetDimensionMismatchCount;
+    private long _attachmentProxyDraws;
+    private long _negativeViewportCalls;
+    private long _positiveViewportCalls;
+    internal long TargetDimensionMismatchCount => _targetDimensionMismatchCount;
+    internal long AttachmentProxyDraws => System.Threading.Interlocked.Read(ref _attachmentProxyDraws);
+    internal long NegativeViewportCalls => System.Threading.Interlocked.Read(ref _negativeViewportCalls);
+    internal long PositiveViewportCalls => System.Threading.Interlocked.Read(ref _positiveViewportCalls);
+    internal float LastGuestViewportSignedHeight { get; private set; }
+    internal float LastGuestViewportDepthNear { get; private set; }
+    internal float LastGuestViewportDepthFar { get; private set; }
     public void SetRenderTargetColorMasks(ReadOnlySpan<uint> masks)
     {
         if (masks.Length > 8) throw Unsupported("more than eight render-target masks");
@@ -762,10 +821,18 @@ public sealed unsafe class D3D12Pipeline : IPipeline
         {
             var (fallbackWidth, fallbackHeight) = GetActiveTargetSize();
             _state.Viewport = new NativeViewport { Width = fallbackWidth, Height = fallbackHeight, MaxDepth = 1 };
+            LastGuestViewportSignedHeight = fallbackHeight;
+            LastGuestViewportDepthNear = 0f;
+            LastGuestViewportDepthFar = 1f;
             return;
         }
 
         var v = viewports[0];
+        LastGuestViewportSignedHeight = v.Region.Height;
+        if (v.Region.Height < 0f) System.Threading.Interlocked.Increment(ref _negativeViewportCalls);
+        else System.Threading.Interlocked.Increment(ref _positiveViewportCalls);
+        LastGuestViewportDepthNear = v.DepthNear;
+        LastGuestViewportDepthFar = v.DepthFar;
         if (v.SwizzleX != ViewportSwizzle.PositiveX || v.SwizzleY != ViewportSwizzle.PositiveY || v.SwizzleZ != ViewportSwizzle.PositiveZ || v.SwizzleW != ViewportSwizzle.PositiveW)
             throw Unsupported("viewport swizzle");
 
@@ -813,10 +880,24 @@ public sealed unsafe class D3D12Pipeline : IPipeline
     public void SetUniformBuffers(ReadOnlySpan<BufferAssignment> buffers) { foreach (var b in buffers) _uniforms[b.Binding] = b.Range; }
     public void SetStorageBuffers(ReadOnlySpan<BufferAssignment> buffers) { foreach (var b in buffers) _storage[b.Binding] = b.Range; }
     public void SetTextureAndSampler(ShaderStage stage, int binding, ITexture texture, ISampler sampler)
-    { _textures[(stage, binding)] = (texture == null ? null : _renderer.Texture(texture), sampler as D3D12Sampler); }
+    {
+        if (sampler != null && sampler is not D3D12Sampler) throw new ArgumentException("Foreign sampler.");
+        var next = texture == null ? null : _renderer.Texture(texture);
+        next?.RetainBinding();
+        _textures.TryGetValue((stage, binding), out var previous);
+        _textures[(stage, binding)] = (next, sampler as D3D12Sampler);
+        previous.Item1?.ReleaseBinding();
+    }
     public void SetTextureArray(ShaderStage stage, int binding, ITextureArray array) => _arrays[(stage, binding)] = array as D3D12TextureArray ?? throw new ArgumentException("Foreign array.");
     public void SetTextureArraySeparate(ShaderStage stage, int set, ITextureArray array) => _separateArrays[(stage, set)] = array as D3D12TextureArray ?? throw new ArgumentException("Foreign array.");
-    public void SetImage(ShaderStage stage, int binding, ITexture texture) => _imageTextures[(stage, binding)] = texture == null ? null : _renderer.Texture(texture);
+    public void SetImage(ShaderStage stage, int binding, ITexture texture)
+    {
+        var next = texture == null ? null : _renderer.Texture(texture);
+        next?.RetainBinding();
+        _imageTextures.TryGetValue((stage, binding), out var previous);
+        _imageTextures[(stage, binding)] = next;
+        previous?.ReleaseBinding();
+    }
     public void SetImageArray(ShaderStage stage, int binding, IImageArray array) => _images[(stage, binding)] = array as D3D12ImageArray ?? throw new ArgumentException("Foreign image array.");
     public void SetImageArraySeparate(ShaderStage stage, int set, IImageArray array) => _separateImages[(stage, set)] = array as D3D12ImageArray ?? throw new ArgumentException("Foreign image array.");
     public void SetPrimitiveTopology(PrimitiveTopology topology) => _topology = topology;
@@ -1005,7 +1086,61 @@ public sealed unsafe class D3D12Pipeline : IPipeline
             if (b.Offset < 0 || b.Size < 0 || (b.Offset & 3) != 0 || (b.Size & 3) != 0) throw new ArgumentException("Unaligned stream-output range.");
         _feedbackBuffers = buffers.ToArray();
     }
-    internal void DisposeResources() { foreach (var counter in _feedbackCounters) counter?.Dispose(); }
+    // Preserve the original depth/stencil storage when color is larger. Copying
+    // a depth rectangle into a larger proxy is illegal in D3D12 and a depth-only
+    // shader copy would lose stencil. Color can be copied exactly, without a
+    // resolve or a change of viewport coordinates. Limit this path to 2D 1x
+    // attachments; array/MSAA compatibility requires a separate implementation.
+    private uint PrepareAttachmentProxies(ref NativeDraw draw)
+    {
+        if (_depthTarget == null || _discard || draw.ColorTargetCount == 0 ||
+            _depthTarget.Info.Samples != 1 || _depthTarget.Info.Target != Target.Texture2D)
+            return 0;
+        int width = _depthTarget.Width, height = _depthTarget.Height;
+        bool needed = false;
+        for (int i = 0; i < draw.ColorTargetCount; i++)
+        {
+            var color = _colorTargets[i];
+            if (color == null) continue;
+            if (color.Info.Samples != 1 || color.Info.Target != Target.Texture2D) return 0;
+            needed |= color.Width > _depthTarget.Width || color.Height > _depthTarget.Height;
+            width = Math.Min(width, color.Width);
+            height = Math.Min(height, color.Height);
+        }
+        if (!needed) return 0;
+        uint mask = 0;
+        for (int i = 0; i < draw.ColorTargetCount; i++)
+        {
+            var color = _colorTargets[i];
+            if (color == null) continue;
+            var proxy = _attachmentProxies[i];
+            if (proxy == null || proxy.Width != width || proxy.Height != height || proxy.Format != color.Native.Format)
+            {
+                var replacement = _renderer.Device.CreateTexture((uint)width, (uint)height, color.Native.Format);
+                _attachmentProxies[i] = replacement;
+                proxy?.Dispose();
+                proxy = replacement;
+            }
+            _renderer.Device.CopyTexture(color.Native, proxy, 0, 0, 0, 0, (uint)width, (uint)height);
+            draw.ColorTargets[i] = _renderer.Device.ResourceId(proxy);
+            mask |= 1u << i;
+        }
+        draw.ColorTarget = draw.ColorTargets[0];
+        return mask;
+    }
+
+    internal void DisposeResources()
+    {
+        foreach (var pair in _textures.Values) pair.Item1?.ReleaseBinding();
+        _textures.Clear();
+        foreach (var image in _imageTextures.Values) image?.ReleaseBinding();
+        _imageTextures.Clear();
+        foreach (var target in _colorTargets) target?.ReleaseBinding();
+        _colorTargets = [];
+        _depthTarget?.ReleaseBinding(); _depthTarget = null; _target = null;
+        foreach (var counter in _feedbackCounters) counter?.Dispose();
+        foreach (var proxy in _attachmentProxies) proxy?.Dispose();
+    }
     public bool TryHostConditionalRendering(ICounterEvent value, ulong compare, bool equal) => false; // GAL performs the counter fallback.
     public bool TryHostConditionalRendering(ICounterEvent value, ICounterEvent compare, bool equal) => false;
     public void EndHostConditionalRendering() => throw new InvalidOperationException("No native conditional-rendering scope was started.");

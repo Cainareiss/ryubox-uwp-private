@@ -134,4 +134,12 @@ internal readonly record struct D3D12TextureFormat(uint Dxgi, int Bytes)
         var fb = GetFamily(b);
         return fa != FormatFamily.Unknown && fa == fb;
     }
+
+    // Texture.CopyTo is a byte-preserving subresource copy. Sampling an sRGB
+    // source to write an UNORM target changes the stored RGB values.
+    internal static bool IsBitwiseSrgbUnormPair(Format a, Format b) =>
+        (a == Format.R8G8B8A8Srgb && b == Format.R8G8B8A8Unorm) ||
+        (a == Format.R8G8B8A8Unorm && b == Format.R8G8B8A8Srgb) ||
+        (a == Format.B8G8R8A8Srgb && b == Format.B8G8R8A8Unorm) ||
+        (a == Format.B8G8R8A8Unorm && b == Format.B8G8R8A8Srgb);
 }

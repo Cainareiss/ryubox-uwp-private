@@ -43,6 +43,7 @@ namespace ARMeilleure.Translation
         public OpCode CurrOp { get; set; }
 
         public IMemoryManager Memory { get; }
+        internal GuestAccessProbe AccessProbe { get; set; }
 
         public EntryTable<uint> CountTable { get; }
         public IAddressTable<ulong> FunctionTable { get; }

@@ -1,0 +1,16 @@
+sxe ld:Ryujinx.Uwp.CoreHost.dll
+g
+.echo === COREHOST LOADED ===
+bp kernel32!AddVectoredExceptionHandler ".echo === ADD VEH ===; r rcx,rdx; kb; gu; .echo === ADD VEH RETURN ===; r rax; g"
+sxe av
+g
+.echo === FIRST ACCESS VIOLATION ===
+.exr -1
+r
+!address @rdx
+g
+.echo === NEXT/SECOND ACCESS VIOLATION ===
+.exr -1
+r
+kv
+q

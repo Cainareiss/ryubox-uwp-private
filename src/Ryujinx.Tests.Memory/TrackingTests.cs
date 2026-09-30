@@ -359,6 +359,18 @@ namespace Ryujinx.Tests.Memory
         }
 
         [Test]
+        public void DisposeHandleConcurrently()
+        {
+            RegionHandle handle = _tracking.BeginTracking(0, PageSize, 0);
+            handle.Reprotect();
+            System.Threading.Tasks.Parallel.For(0, 32, _ => handle.Dispose());
+            Assert.DoesNotThrow(() => handle.Dispose());
+            Assert.AreEqual(0, _tracking.GetRegionCount());
+            using RegionHandle replacement = _tracking.BeginTracking(0, PageSize, 0);
+            Assert.True(TestSingleWrite(replacement, 0, 4));
+        }
+
+        [Test]
         public void DisposeHandles()
         {
             // Ensure that disposed handles correctly remove their virtual and physical regions.

@@ -25,13 +25,13 @@ bool CanGrow(long usage, long limit) => (bool)admission.Invoke(null, [usage, lim
 bool CanCommit(long usage, long limit, int bytes) => (bool)commitAdmission.Invoke(null, [usage, limit, bytes])!;
 const long mib = 1024L * 1024;
 Check(CanGrow(1024 * mib, 5120 * mib), "normal process budget permits lazy JIT growth beyond 512 MiB");
-Check(CanGrow(4352 * mib, 5120 * mib) && !CanGrow(4352 * mib + 1, 5120 * mib),
-    "growth reserves a full region plus 512 MiB of process headroom");
-Check(!CanGrow(0, 5120 * mib) && !CanGrow(long.MaxValue, 5120 * mib) && !CanGrow(1, 512 * mib),
+Check(CanGrow(4992 * mib, 5120 * mib) && !CanGrow(4992 * mib + 1, 5120 * mib),
+    "lazy JIT reservation retains 128 MiB of process headroom without charging uncommitted virtual space");
+Check(!CanGrow(0, 5120 * mib) && !CanGrow(long.MaxValue, 5120 * mib) && !CanGrow(1, 128 * mib),
     "missing samples and exhausted budgets fail closed without overflow");
-Check(CanCommit(4672 * mib - 65536, 5120 * mib, 65536) &&
-    !CanCommit(4672 * mib - 65535, 5120 * mib, 65536),
-    "JIT commit retains an exact 448 MiB process headroom");
+Check(CanCommit(4992 * mib - 65536, 5120 * mib, 65536) &&
+    !CanCommit(4992 * mib - 65535, 5120 * mib, 65536),
+    "JIT physical commit is charged separately and retains exactly 128 MiB headroom");
 var configuredLimit = typeof(JitCache).GetMethod("GetConfiguredMaxRegions", BindingFlags.NonPublic | BindingFlags.Static)!;
 object? oldLimit = AppContext.GetData("Ryujinx.Uwp.JitCacheMaxRegions");
 try
@@ -39,7 +39,7 @@ try
     AppContext.SetData("Ryujinx.Uwp.JitCacheMaxRegions", 6);
     Check((int)configuredLimit.Invoke(null, null)! == 6, "host can admit six lazy regions for large titles");
     AppContext.SetData("Ryujinx.Uwp.JitCacheMaxRegions", 99);
-    Check((int)configuredLimit.Invoke(null, null)! == 6, "region cap remains bounded");
+    Check((int)configuredLimit.Invoke(null, null)! == 8, "region cap remains bounded to eight virtual regions");
 }
 finally { AppContext.SetData("Ryujinx.Uwp.JitCacheMaxRegions", oldLimit); }
 // Actual virtual reservations and executable memory protection. Test code is
@@ -371,6 +371,15 @@ Check(!JitReclaimPolicy.NeedsReclaim(256UL * 1024 * 1024, JitReclaimPolicy.LowFr
     JitReclaimPolicy.TargetFreeBytes > JitReclaimPolicy.LowFreeBytes,
     "JIT maintenance has separate low/high free-space watermarks");
 var reclaimPolicy = new JitReclaimPolicy();
+Check(JitReclaimPolicy.PreferGrowth(1, 6, 3 * 1024 * mib, 5 * 1024 * mib),
+    "maintenance allows a growing working set instead of purging the first JIT region");
+Check(JitReclaimPolicy.PreferGrowth(1, 6, 4736 * mib, 5120 * mib) &&
+    !JitReclaimPolicy.PreferGrowth(1, 6, 4736 * mib + 1, 5120 * mib),
+    "maintenance growth preference preserves full-region plus 128 MiB headroom");
+Check(!JitReclaimPolicy.PreferGrowth(6, 6, 1024 * mib, 5120 * mib) &&
+    !JitReclaimPolicy.PreferGrowth(1, 6, 0, 5120 * mib) &&
+    !JitReclaimPolicy.PreferGrowth(1, 6, long.MaxValue, 5120 * mib),
+    "capacity exhaustion and invalid or pressured samples retain reclamation");
 Check(reclaimPolicy.TrySchedule(1000) && !reclaimPolicy.TrySchedule(1001) &&
     !reclaimPolicy.TrySchedule(1999) && reclaimPolicy.TrySchedule(2000),
     "translation bursts cannot schedule more than one maintenance scan per second");
@@ -579,10 +588,191 @@ Check(lookupReported && !failedLookupContext.Running && JitCache.GetDetailedTele
 failedLookupContext.Dispose();
 Console.WriteLine($"{checks} checks passed including null dispatch regression");
 
+// Allocation recovery must be able to collect even when a periodic trim just
+// ran. The normal five-second cooldown remains in effect for routine calls.
+Ryujinx.Common.Memory.RuntimeMemoryBudget.ResetSession();
+int admissionTrims = 0;
+void CountTrim(Ryujinx.Common.Memory.MemoryPressure _) => admissionTrims++;
+Ryujinx.Common.Memory.RuntimeMemoryBudget.TrimRequested += CountTrim;
+try
+{
+    var critical = Ryujinx.Common.Memory.MemoryPressure.Critical;
+    Check(Ryujinx.Common.Memory.RuntimeMemoryBudget.RequestTrim(critical), "initial trim runs");
+    Check(!Ryujinx.Common.Memory.RuntimeMemoryBudget.RequestTrim(critical), "routine trim cooldown remains active");
+    Check(Ryujinx.Common.Memory.RuntimeMemoryBudget.RequestTrim(critical, admissionFailure: true) && admissionTrims == 2,
+        "failed JIT admission gets one recovery despite routine cooldown");
+}
+finally { Ryujinx.Common.Memory.RuntimeMemoryBudget.TrimRequested -= CountTrim; }
+
+// Publication pattern used by guest singleton initialization: the exclusive
+// load discards its result in WZR but MUST still establish the reservation.
+// Check its release-store and the acquire/read + CSEL consumer across dispatch.
+foreach (bool deepCallProtection in new[] { false, true })
+foreach (bool native in new[] { false, true })
+foreach (bool watched in new[] { false, true })
+foreach (uint initialValue in new uint[] { 0, 7 })
+foreach (bool acrossCall in new[] { false, true })
+{
+    AppContext.SetSwitch("Ryujinx.Uwp.PinnedJitDispatch", true);
+    AppContext.SetSwitch("Ryujinx.Uwp.SafeJit", true);
+    ARMeilleure.Optimizations.EnableDeepCallRecursionProtection = deepCallProtection;
+    ARMeilleure.Optimizations.UseUnmanagedDispatchLoop = native;
+    using var atomicData = new MemoryBlock(4096);
+    using var atomicTable = new MemoryBlock(4096);
+    atomicData.Write(0, initialValue);
+    ulong tag = watched ? 1UL << 63 : 0;
+    atomicTable.Write(2 * 8, unchecked((ulong)atomicData.Pointer) | tag);
+    var atomicMemory = new GuestMemory { TestPageTable = atomicTable.Pointer };
+    uint[] sequence = [0x52800029, 0x885F7D1F, 0x880AFD09, 0x35FFFFCA,
+        0xB9400109, 0xD50339BF, 0x7100013F, 0x9A8803E0, 0xD65F00A0];
+    if (acrossCall)
+    {
+        // Publisher executes in a subroutine; its RET returns through pinned
+        // dispatch before the acquire/read and conditional-select consumer.
+        sequence = [0x94000010, 0xB9400109, 0xD50339BF, 0x7100013F, 0x9A8803E0, 0xD65F00A0];
+        uint[] publisher = [0x52800029, 0x885F7D1F, 0x880AFD09, 0x35FFFFCA, 0xD65F03C0];
+        for (int i = 0; i < publisher.Length; i++) atomicMemory.Write(0x1040UL + (uint)i * 4, publisher[i]);
+    }
+    for (int i = 0; i < sequence.Length; i++) atomicMemory.Write(0x1000UL + (uint)i * 4, sequence[i]);
+    var atomicTranslator = new Translator(new TestAllocator(), atomicMemory, new TestTable { TestMask = 0 });
+    var atomicContext = new ARMeilleure.State.ExecutionContext(new TestAllocator(), null!);
+    try
+    {
+        atomicContext.SetX(8, 0x2000);
+        atomicTranslator.Execute(atomicContext, 0x1000);
+        Check(atomicData.Read<uint>(0) == 1 && atomicContext.GetX(0) == 0x2000 && atomicContext.GetX(10) == 0,
+            $"LDXR WZR/STLXR publication and CSEL consumer: deepCallProtection={deepCallProtection}, native={native}, watched={watched}, initial={initialValue}, acrossCall={acrossCall}");
+        Check(JitCache.GetDetailedTelemetry() == default, "exclusive publication test releases JIT mappings");
+    }
+    finally { atomicContext.Dispose(); }
+}
+ARMeilleure.Optimizations.EnableDeepCallRecursionProtection = true;
+
+// Keep integer/SIMD values and NZCV live across a basic-block poll. The
+// watched read requests an interrupt AFTER the guest values were produced,
+// so the callback runs inside translated code, not just at dispatch entry.
+foreach (bool safe in new[] { false, true })
+foreach (bool pinned in new[] { false, true })
+foreach (bool native in new[] { false, true })
+{
+    AppContext.SetSwitch("Ryujinx.Uwp.SafeJit", safe);
+    AppContext.SetSwitch("Ryujinx.Uwp.PinnedJitDispatch", pinned);
+    ARMeilleure.Optimizations.UseUnmanagedDispatchLoop = native;
+    using var pollData = new MemoryBlock(4096);
+    using var pollTable = new MemoryBlock(4096);
+    pollTable.Write(2 * 8, unchecked((ulong)pollData.Pointer) | (1UL << 62));
+    var pollMemory = new GuestMemory { TestPageTable = pollTable.Pointer };
+    var words = new List<uint>();
+    for (uint reg = 0; reg < 26; reg++) words.Add(0x91000400u | (reg << 5) | reg); // ADD Xn, Xn, #1
+    words.Add(0x4E218400u); // ADD V0.16B, V0.16B, V1.16B
+    words.Add(0xEB00001Fu); // CMP X0, X0 (Z/C set)
+    words.Add(0xF940039Du); // LDR X29, [X28], watched => request interrupt
+    words.Add(0xB400005Bu); // CBZ X27, +8 (always taken, new basic block)
+    words.Add(0xD4200000u); // BRK: wrong branch must never execute
+    words.Add(0x9A9F17F9u); // CSET X25, EQ: consume flags across the poll
+    words.Add(0xD100075Au); // SUB X26, X26, #1
+    int branchIndex = words.Count;
+    words.Add(0xB500001Au | ((uint)(-branchIndex) & 0x7ffffu) << 5); // CBNZ X26, loop
+    words.Add(0xD65F0360u); // RET X27 (zero = exit)
+    for (int i = 0; i < words.Count; i++) pollMemory.Write(0x1000UL + (uint)i * 4, words[i]);
+    int pollInterrupts = 0;
+    var pollContext = new ARMeilleure.State.ExecutionContext(new TestAllocator(), null!, interruptCallback: _ =>
+    {
+        pollInterrupts++;
+        // Exercise managed/native calls and volatile host registers while
+        // all guest values must remain intact across the ABI boundary.
+        Thread.Yield();
+        GC.KeepAlive(Math.Sin(pollInterrupts) + Environment.TickCount64);
+    });
+    pollMemory.TrackingCallback = () => pollContext.RequestInterrupt();
+    try
+    {
+        pollContext.SetX(26, 128);
+        pollContext.SetX(28, 0x2000);
+        pollContext.SetV(1, new ARMeilleure.State.V128(0x0101010101010101UL, 0x0101010101010101UL));
+        var pollTranslator = new Translator(new TestAllocator(), pollMemory, new TestTable { TestMask = 0 });
+        pollTranslator.Execute(pollContext, 0x1000);
+        Check(Enumerable.Range(0, 25).All(reg => pollContext.GetX(reg) == 128) &&
+            pollContext.GetX(25) == 1 && pollContext.GetX(26) == 0 &&
+            pollContext.GetV(0).Equals(new ARMeilleure.State.V128(0x8080808080808080UL, 0x8080808080808080UL)),
+            $"live GPR/SIMD/NZCV survive sync: safe={safe}, pinned={pinned}, native={native}");
+        Check(pollInterrupts >= 127 && JitCache.GetDetailedTelemetry() == default,
+            $"sync callbacks execute and mappings are released: count={pollInterrupts}, safe={safe}, pinned={pinned}, native={native}");
+    }
+    finally { pollContext.Dispose(); }
+}
+AppContext.SetSwitch("Ryujinx.Uwp.SafeJit", true);
+AppContext.SetSwitch("Ryujinx.Uwp.PinnedJitDispatch", true);
+
+// Diagnostic probes are opt-in, bounded and never modify guest state or turn
+// failed/unmapped reads into data consumed by guest instructions.
+foreach (string bad in new[] { "", "1000", "1001|2000", "1000|2001", "0|2000", "1000|FFFFFFFFFFFFFFFF",
+    "1,2,3,4,5,6,7,8,9|2000", "1000|not-hex" })
+    Check(ARMeilleure.Diagnostics.GuestDispatchProbe.Parse(bad) == null, "invalid/disabled diagnostic probe is ignored");
+var probe = ARMeilleure.Diagnostics.GuestDispatchProbe.Parse("0x1000|0x2000,0x10000")!;
+var probeMemory = new GuestMemory();
+probeMemory.Write(0x2000, 0x123456789ABCDEF0UL);
+var probeContext = new ARMeilleure.State.ExecutionContext(new TestAllocator(), null!);
+try
+{
+    probeContext.SetX(0, 123);
+    Check(probe.Observe(0x1004, probeContext, probeMemory) == null, "probe ignores non-selected dispatch sites");
+    string observation = probe.Observe(0x1000, probeContext, probeMemory)!;
+    Check(observation.Contains("0x123456789ABCDEF0") && observation.Contains("unmapped"), "probe reports mapped words and unmapped addresses distinctly");
+    Check(probeContext.GetX(0) == 123 && probeMemory.Read<ulong>(0x2000) == 0x123456789ABCDEF0UL,
+        "probe preserves registers and guest memory");
+    probeMemory.FailReads = true;
+    Check(probe.Observe(0x1000, probeContext, probeMemory)!.Contains("unavailable(OutOfMemoryException)"),
+        "diagnostic read failure is reported without replacing the primary guest fault");
+    for (int i = 2; i < 8; i++) Check(probe.Observe(0x1000, probeContext, probeMemory) != null, "probe accepts bounded samples");
+    Check(probe.Observe(0x1000, probeContext, probeMemory) == null, "probe stops after eight samples at a site");
+}
+finally { probeContext.Dispose(); }
+foreach (string bad in new[] { "", "w:0", "w:2001", "x:2000", "r:FFFFFFFFFFFFFFFF" })
+    Check(ARMeilleure.Diagnostics.GuestAccessProbe.Parse(bad) == null, "invalid access probe ignored");
+var accessProbe = ARMeilleure.Diagnostics.GuestAccessProbe.Parse("w:2000")!;
+Check(accessProbe.Observe(0x1000, 0x1ff8, 8, true, probeMemory) == null &&
+    accessProbe.Observe(0x1000, 0x2008, 8, true, probeMemory) == null &&
+    accessProbe.Observe(0x1000, 0x2000, 8, false, probeMemory) == null, "access probe excludes adjacent ranges and wrong direction");
+probeMemory.FailReads = false;
+Check(accessProbe.Observe(0x1000, 0x1ffc, 8, true, probeMemory) != null, "access probe catches overlapping unaligned write");
+string? oldAccessProbe = Environment.GetEnvironmentVariable("RYUJINX_UWP_GUEST_ACCESS_PROBE");
+try
+{
+    Environment.SetEnvironmentVariable("RYUJINX_UWP_GUEST_ACCESS_PROBE", "w:2000");
+    foreach (bool fast in new[] { false, true })
+    foreach (bool native in new[] { false, true })
+    {
+        ARMeilleure.Optimizations.UseUnmanagedDispatchLoop = native;
+        using var data = new MemoryBlock(4096);
+        using var table = new MemoryBlock(4096);
+        if (fast) table.Write(2 * 8, unchecked((ulong)data.Pointer));
+        var memory = new GuestMemory { TestPageTable = table.Pointer };
+        uint[] accessCode = [0xF9000044, 0xF9000044, 0xF9400040, 0xD65F00A0]; // STR/STR/LDR/RET X5
+        for (int i = 0; i < accessCode.Length; i++) memory.Write(0x1000UL + (uint)i * 4, accessCode[i]);
+        int reads = 0;
+        memory.AfterRead = address => { if (address == 0x2000) reads++; };
+        var context = new ARMeilleure.State.ExecutionContext(new TestAllocator(), null!);
+        try
+        {
+        context.SetX(2, 0x2000);
+        context.SetX(4, 0x1234);
+        new Translator(new TestAllocator(), memory, new TestTable { TestMask = 0 }).Execute(context, 0x1000);
+        Check(reads == (fast ? 2 : 3) && context.GetX(0) == 0x1234 && context.GetX(4) == 0x1234,
+            $"exact access probe observes repeated writes without changing results: fast={fast}, native={native}, reads={reads}");
+        Check(JitCache.GetDetailedTelemetry() == default, "access probe test releases JIT mappings");
+        }
+        finally { context.Dispose(); }
+    }
+}
+finally { Environment.SetEnvironmentVariable("RYUJINX_UWP_GUEST_ACCESS_PROBE", oldAccessProbe); }
+Console.WriteLine($"{checks} checks passed including exclusive publication and bounded diagnostic probes");
+
 sealed record CodeHandle(nint Pointer);
 
 sealed class GuestMemory : IMemoryManager
 {
+    public Action? TrackingCallback;
     public bool FailReads;
     public ulong? FaultAddress;
     public Action<ulong>? AfterRead;
@@ -600,7 +790,11 @@ sealed class GuestMemory : IMemoryManager
         AfterRead?.Invoke(va);
         return result;
     }
-    public T ReadTracked<T>(ulong va) where T : unmanaged => Read<T>(va);
+    public T ReadTracked<T>(ulong va) where T : unmanaged
+    {
+        TrackingCallback?.Invoke();
+        return Read<T>(va);
+    }
     public void Write<T>(ulong va, T value) where T : unmanaged
     {
         if (va == FaultAddress) throw new InvalidMemoryRegionException();
@@ -609,7 +803,7 @@ sealed class GuestMemory : IMemoryManager
     public ReadOnlySpan<byte> GetSpan(ulong va, int size, bool tracked = false) => _bytes.AsSpan(checked((int)va), size);
     public ref T GetRef<T>(ulong va) where T : unmanaged => ref MemoryMarshal.AsRef<T>(_bytes.AsSpan(checked((int)va)));
     public bool IsMapped(ulong va) => va < (ulong)_bytes.Length;
-    public void SignalMemoryTracking(ulong va, ulong size, bool write, bool precise = false, int? exemptId = null) { }
+    public void SignalMemoryTracking(ulong va, ulong size, bool write, bool precise = false, int? exemptId = null) => TrackingCallback?.Invoke();
 }
 
 sealed class TestTable : IAddressTable<ulong>

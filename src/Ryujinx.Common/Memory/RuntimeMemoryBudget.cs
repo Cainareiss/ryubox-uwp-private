@@ -23,6 +23,8 @@ namespace Ryujinx.Common.Memory
         NativeAllocator,
         CompilerArena,
         Misc,
+        D3D12Resources,
+        D3D12Uploads,
     }
 
     public enum MemoryPressure
@@ -61,7 +63,8 @@ namespace Ryujinx.Common.Memory
     public static class RuntimeMemoryBudget
     {
         private const long GiB = 1024L * 1024L * 1024L;
-        private static readonly long[] Bytes = Enumerable.Repeat(-1L, Enum.GetValues<MemoryCategory>().Length).ToArray();
+        private static long[] Bytes = NewCounters();
+        private static long[] NewCounters() => Enumerable.Repeat(-1L, Enum.GetValues<MemoryCategory>().Length).ToArray();
         private static readonly SemaphoreSlim CompilerGate = new(1, 1);
         private static long _limit = 5L * GiB;
         private static long _expectedLimit = 5L * GiB;
@@ -69,6 +72,8 @@ namespace Ryujinx.Common.Memory
         private static string _limitSource = "conservative-5GiB";
         private static MemoryBudgetSnapshot _lastSnapshot;
         private static long _lastCompilerTrimAt;
+        private static long _lastAdmissionSampleAt;
+        private static long _lastAdmissionUsage;
         private static int _trimActive;
         private static MemoryPressure _lastTrimPressure;
 
@@ -78,6 +83,41 @@ namespace Ryujinx.Common.Memory
         public static long Limit => Interlocked.Read(ref _limit);
         public static long ExpectedLimit => Interlocked.Read(ref _expectedLimit);
         public static MemoryBudgetSnapshot LastSnapshot => _lastSnapshot;
+
+        /// <summary>
+        /// Samples process usage without changing pressure state or invoking trim callbacks.
+        /// This is safe for admission checks that run while allocator locks are held.
+        /// </summary>
+        public static long GetEffectiveUsageNoTrim()
+        {
+            long now = Environment.TickCount64;
+            long sampledAt = Interlocked.Read(ref _lastAdmissionSampleAt);
+            long cached = Interlocked.Read(ref _lastAdmissionUsage);
+            if (cached > 0 && now - sampledAt < 100)
+            {
+                return cached;
+            }
+
+            long workingSet = Environment.WorkingSet;
+            long privateBytes = 0;
+            try
+            {
+                using Process process = Process.GetCurrentProcess();
+                process.Refresh();
+                privateBytes = process.PrivateMemorySize64;
+            }
+            catch
+            {
+                // Process information may be unavailable in older UWP sandboxes.
+            }
+
+            GCMemoryInfo gcInfo = GC.GetGCMemoryInfo();
+            long managedUsage = Math.Max(GC.GetTotalMemory(false), gcInfo.TotalCommittedBytes);
+            long usage = Math.Max(Math.Max(workingSet, privateBytes), managedUsage);
+            Interlocked.Exchange(ref _lastAdmissionUsage, usage);
+            Interlocked.Exchange(ref _lastAdmissionSampleAt, now);
+            return usage;
+        }
 
         public static void Configure(ulong appMemoryLimit, ulong expectedAppMemoryLimit = 0)
         {
@@ -96,18 +136,22 @@ namespace Ryujinx.Common.Memory
 
         public static void ResetSession()
         {
-            for (int index = 0; index < Bytes.Length; index++)
-            {
-                Interlocked.Exchange(ref Bytes[index], -1);
-            }
+            // A late release from the previous session must update its own
+            // counters, never subtract bytes from the new session.
+            Interlocked.Exchange(ref Bytes, NewCounters());
 
             Volatile.Write(ref _pressure, (int)MemoryPressure.Normal);
             _lastSnapshot = default;
             Interlocked.Exchange(ref _lastCompilerTrimAt, 0);
+            Interlocked.Exchange(ref _lastAdmissionSampleAt, 0);
+            Interlocked.Exchange(ref _lastAdmissionUsage, 0);
         }
 
         public static void Observe(MemoryCategory category, long bytes) =>
-            Interlocked.Exchange(ref Bytes[(int)category], bytes);
+            Interlocked.Exchange(ref Volatile.Read(ref Bytes)[(int)category], bytes);
+
+        public static long GetObservedBytes(MemoryCategory category) =>
+            Interlocked.Read(ref Volatile.Read(ref Bytes)[(int)category]);
 
         public static bool CanAdmitGuestCommit(long used, long limit, long bytes) =>
             used >= 0 && bytes >= 0 && limit > 0 &&
@@ -136,10 +180,11 @@ namespace Ryujinx.Common.Memory
                 throw new ArgumentOutOfRangeException(nameof(bytes));
             }
 
-            ref long counter = ref Bytes[(int)category];
+            long[] counters = Volatile.Read(ref Bytes);
+            ref long counter = ref counters[(int)category];
             Interlocked.CompareExchange(ref counter, 0, -1);
             Interlocked.Add(ref counter, bytes);
-            return new Lease(() => Interlocked.Add(ref Bytes[(int)category], -bytes));
+            return new Lease(() => Interlocked.Add(ref counters[(int)category], -bytes));
         }
 
         public static MemoryPressure Classify(long used, long limit)
@@ -178,6 +223,10 @@ namespace Ryujinx.Common.Memory
             Observe(MemoryCategory.Managed, managedCommitted > 0 ? managedCommitted : managedHeap);
 
             long effectiveUsage = Math.Max(Math.Max(workingSet, privateBytes), managedCommitted);
+            // Refresh is an explicit new sample, including after trimming.
+            // Do not let the admission cache retain an older, higher reading.
+            Interlocked.Exchange(ref _lastAdmissionUsage, effectiveUsage);
+            Interlocked.Exchange(ref _lastAdmissionSampleAt, Environment.TickCount64);
             MemoryPressure next = ClassifyWithHeadroom(effectiveUsage, Limit);
             MemoryPressure previous = (MemoryPressure)Interlocked.Exchange(ref _pressure, (int)next);
             _lastSnapshot = new MemoryBudgetSnapshot(
@@ -209,7 +258,7 @@ namespace Ryujinx.Common.Memory
             Observe(MemoryCategory.Managed, managedBytes);
             string counters = string.Join(" ", Enum.GetValues<MemoryCategory>().Distinct().Select(category =>
             {
-                long bytes = Interlocked.Read(ref Bytes[(int)category]);
+                long bytes = GetObservedBytes(category);
                 return category + "=" + (bytes < 0 ? "untracked" : bytes.ToString());
             }));
             return $"MEM {snapshot} {counters} categoriesNotAdditive=true diagnosticRecordsDropped={Logging.BufferedDiagnosticWriter.DroppedRecords}";
@@ -225,19 +274,31 @@ namespace Ryujinx.Common.Memory
 
         public static IDisposable EnterCompiler(long estimatedScratchBytes = 0)
         {
+            ArgumentOutOfRangeException.ThrowIfNegative(estimatedScratchBytes);
             CompilerGate.Wait();
             try
             {
                 MemoryBudgetSnapshot snapshot = Refresh();
                 RequestTrim(snapshot.Pressure);
 
-                Observe(MemoryCategory.Compiler, estimatedScratchBytes > 0 ? estimatedScratchBytes : -1);
+                long usage = GetEffectiveUsageNoTrim();
+                if (!CanAdmitGuestCommit(usage, Limit, estimatedScratchBytes))
+                {
+                    RequestTrim(MemoryPressure.Critical, admissionFailure: true);
+                    usage = Refresh().EffectiveUsage;
+                    if (!CanAdmitGuestCommit(usage, Limit, estimatedScratchBytes))
+                        throw new OutOfMemoryException(
+                            $"Shader compiler admission refused after recovery: processUsage={usage}, " +
+                            $"limit={Limit}, estimatedScratch={estimatedScratchBytes}, headroom=134217728.");
+                }
+
+                IDisposable scratch = Track(MemoryCategory.Compiler, estimatedScratchBytes);
                 long compilerStart = Stopwatch.GetTimestamp();
                 Logging.RuntimeGpuTelemetry.CompilerBegin();
                 return new Lease(() =>
                 {
                     Logging.RuntimeGpuTelemetry.CompilerEnd(compilerStart);
-                    Observe(MemoryCategory.Compiler, 0);
+                    scratch.Dispose();
                     CompilerGate.Release();
                 });
             }
@@ -250,14 +311,14 @@ namespace Ryujinx.Common.Memory
 
         // One process-wide owner for recovery. Refresh, compiler admission and
         // subscribers must not cascade several full GCs for the same pressure.
-        public static bool RequestTrim(MemoryPressure pressure)
+        public static bool RequestTrim(MemoryPressure pressure, bool admissionFailure = false)
         {
             if (pressure < MemoryPressure.Warning || Interlocked.CompareExchange(ref _trimActive, 1, 0) != 0) return false;
             try
             {
                 long now = Environment.TickCount64;
                 long elapsed = now - Interlocked.Read(ref _lastCompilerTrimAt);
-                if (_lastCompilerTrimAt != 0 && elapsed < 5000 &&
+                if (!admissionFailure && _lastCompilerTrimAt != 0 && elapsed < 5000 &&
                     !(pressure > _lastTrimPressure && elapsed >= 500)) return false;
                 _lastTrimPressure = pressure;
                 Interlocked.Exchange(ref _lastCompilerTrimAt, now);
@@ -268,10 +329,15 @@ namespace Ryujinx.Common.Memory
                 {
                     // Compaction is an emergency tool, not every shader's cost.
                     if (pressure == MemoryPressure.Emergency) GCSettingsCompat.CompactOnce();
-                    GC.Collect(2, GCCollectionMode.Optimized, blocking: true, compacting: false);
+                    // An allocation already rejected by admission gets one
+                    // actual collection before its retry. Optimized collection
+                    // may do nothing, and the routine cooldown must not turn a
+                    // recoverable temporary peak into a fatal JIT failure.
+                    GC.Collect(2, admissionFailure ? GCCollectionMode.Forced : GCCollectionMode.Optimized,
+                        blocking: true, compacting: false);
                 }
                 Logging.RuntimeDiagnosticLog.Write("memory-trim",
-                    $"pressure={pressure} elapsedMs={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F2} managedBefore={before} managedAfter={GC.GetTotalMemory(false)} cooldownMs=5000");
+                    $"pressure={pressure} admissionFailure={admissionFailure} elapsedMs={Stopwatch.GetElapsedTime(started).TotalMilliseconds:F2} managedBefore={before} managedAfter={GC.GetTotalMemory(false)} cooldownMs=5000");
                 return true;
             }
             finally { Volatile.Write(ref _trimActive, 0); }
@@ -311,7 +377,12 @@ namespace Ryujinx.Common.Memory
             {
                 return fallback;
             }
-            return Math.Min((long)reported, 5L * GiB);
+            // Permit up to 6 GiB on hosts that actually report that allowance;
+            // Xbox's reported 5 GiB quota still clamps the process to 5 GiB.
+            long maxLimit = string.Equals(Environment.GetEnvironmentVariable("RYUJINX_UWP_MEMORY_6GIB"), "1", StringComparison.OrdinalIgnoreCase)
+                ? 6L * GiB
+                : 5L * GiB;
+            return Math.Min((long)reported, maxLimit);
         }
 
         private static int ReadPositiveInt(string key, int defaultValue)

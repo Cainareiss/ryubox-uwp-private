@@ -64,8 +64,7 @@ public sealed class D3D12TextureArray : ITextureArray
         ObjectDisposedException.ThrowIf(Textures == null, this); ArgumentNullException.ThrowIfNull(textures);
         if ((uint)index > (uint)Textures.Length || (uint)textures.Length > (uint)(Textures.Length - index))
             throw new ArgumentOutOfRangeException(nameof(index), "Texture span exceeds array bounds.");
-        foreach (var texture in textures) if (texture != null && texture is not D3D12GalTexture) throw new ArgumentException("Foreign texture.");
-        textures.AsSpan().CopyTo(Textures.AsSpan(index, textures.Length));
+        D3D12TextureBindings.Replace(Textures, index, textures);
     }
     public void SetSamplers(int index, ISampler[] samplers)
     {
@@ -75,7 +74,11 @@ public sealed class D3D12TextureArray : ITextureArray
         foreach (var sampler in samplers) if (sampler != null && sampler is not D3D12Sampler) throw new ArgumentException("Foreign sampler.");
         samplers.AsSpan().CopyTo(Samplers.AsSpan(index, samplers.Length));
     }
-    public void Dispose() { Textures = null; Samplers = null; } // Bindings borrow resource ownership.
+    public void Dispose()
+    {
+        if (Textures != null) foreach (D3D12GalTexture texture in Textures) texture?.ReleaseBinding();
+        Textures = null; Samplers = null;
+    }
 }
 
 public sealed class D3D12ImageArray : IImageArray
@@ -87,8 +90,42 @@ public sealed class D3D12ImageArray : IImageArray
         ObjectDisposedException.ThrowIf(Images == null, this); ArgumentNullException.ThrowIfNull(images);
         if ((uint)index > (uint)Images.Length || (uint)images.Length > (uint)(Images.Length - index))
             throw new ArgumentOutOfRangeException(nameof(index), $"Image span exceeds array bounds: index={index}, images.Length={images.Length}, Images.Length={Images.Length}");
-        foreach (var image in images) if (image != null && image is not D3D12GalTexture) throw new ArgumentException("Foreign image.");
-        images.AsSpan().CopyTo(Images.AsSpan(index, images.Length));
+        D3D12TextureBindings.Replace(Images, index, images);
     }
-    public void Dispose() => Images = null;
+    public void Dispose()
+    {
+        if (Images != null) foreach (D3D12GalTexture image in Images) image?.ReleaseBinding();
+        Images = null;
+    }
+}
+
+internal static class D3D12TextureBindings
+{
+    internal static void Replace(ITexture[] destination, int index, ITexture[] input)
+    {
+        // Take all references before changing any slot, with rollback if one
+        // element was released. This also handles overlapping caller arrays.
+        ITexture[] next = (ITexture[])input.Clone();
+        int retained = 0;
+        try
+        {
+            foreach (var texture in next)
+            {
+                if (texture != null && texture is not D3D12GalTexture) throw new ArgumentException("Foreign texture.");
+                ((D3D12GalTexture)texture)?.RetainBinding();
+                ++retained;
+            }
+        }
+        catch
+        {
+            for (int i = 0; i < retained; ++i) ((D3D12GalTexture)next[i])?.ReleaseBinding();
+            throw;
+        }
+        for (int i = 0; i < next.Length; ++i)
+        {
+            var previous = (D3D12GalTexture)destination[index + i];
+            destination[index + i] = next[i];
+            previous?.ReleaseBinding();
+        }
+    }
 }

@@ -511,10 +511,10 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
             if (Interlocked.Increment(ref _diagnosticBufferLogs) <= 32)
             {
                 Logger.Info?.Print(LogClass.SurfaceFlinger,
-                    $"CancelBuffer: slot={slot}, state={Core.Slots[slot].BufferState}");
+                    $"QueueBuffer: slot={slot}, state={Core.Slots[slot].BufferState}");
             }
 
-            if (Interlocked.Increment(ref _diagnosticQueueLogs) <= 4)
+            if (Interlocked.Increment(ref _diagnosticQueueLogs) <= 32)
             {
                 Logger.Info?.Print(LogClass.SurfaceFlinger, $"QueueBuffer accepted: slot={slot}, frame={item.FrameNumber}, size={item.GraphicBuffer.Object.Width}x{item.GraphicBuffer.Object.Height}");
             }

@@ -506,14 +506,14 @@ namespace Ryujinx.Memory.Tracking
         /// </summary>
         public void Dispose()
         {
-            ObjectDisposedException.ThrowIf(_disposed, this);
-
-            GC.SuppressFinalize(this);
-
-            _disposed = true;
-
             lock (_tracking.TrackingLock)
             {
+                // Session teardown and texture-group teardown can release the
+                // same handle. Check and detach under one lock so concurrent
+                // disposal cannot remove a virtual-region reference twice.
+                if (_disposed) return;
+                _disposed = true;
+                GC.SuppressFinalize(this);
                 foreach (VirtualRegion region in _allRegions)
                 {
                     region.RemoveHandle(this);

@@ -80,7 +80,17 @@ UINT64 UploadBudgetLimit()
     // Upload pages remain cached until their frame fence completes. A bounded
     // budget proportional to the resource budget avoids both permanent 256 MiB
     // exhaustion and unbounded staging growth during texture-heavy scenes.
-    return std::clamp(ResourceBudgetLimit() / 2, 256 * MiB, 1024 * MiB);
+    static const UINT64 budget = [] {
+        UINT64 limit = std::clamp(ResourceBudgetLimit() / 2, 256 * MiB, 1024 * MiB);
+        wchar_t text[32]{};
+        DWORD length = GetEnvironmentVariableW(L"RYUJINX_UWP_D3D12_UPLOAD_BUDGET_MIB", text, ARRAYSIZE(text));
+        if (!length || length >= ARRAYSIZE(text)) return limit;
+        wchar_t* end = nullptr;
+        UINT64 requested = _wcstoui64(text, &end, 10);
+        if (end == text || *end != L'\0' || requested > limit / MiB) return limit;
+        return std::clamp(requested * MiB, 4 * MiB, limit);
+    }();
+    return budget;
 }
 
 // Diagnostic breadcrumb trail for a vendor UMD access violation. The Intel
@@ -457,6 +467,15 @@ struct Frame
         ID3D12DescriptorHeap* heap = nullptr;
         UINT offset = 0;
     };
+    struct BindingGroup
+    {
+        UINT64 hash = 0;
+        ID3D12RootSignature* root = nullptr;
+        std::vector<RyuboxD12Binding> bindings;
+        ID3D12DescriptorHeap* viewHeap = nullptr;
+        ID3D12DescriptorHeap* samplerHeap = nullptr;
+        std::vector<D3D12_GPU_DESCRIPTOR_HANDLE> gpuStarts;
+    };
     ComPtr<ID3D12CommandAllocator> allocator;
     UINT64 fence = 0;
     UINT64 descriptorCount = 0;
@@ -475,6 +494,8 @@ struct Frame
     // fence completes, so cached shader-visible sampler ranges remain valid
     // without extending descriptor retirement or copying unchanged samplers.
     std::vector<SamplerGroup> samplerGroups;
+    std::vector<BindingGroup> bindingGroups;
+    std::unordered_multimap<UINT64, size_t> bindingGroupLookup;
     std::unordered_set<ID3D12PipelineState*> retainedPipelines;
     std::unordered_set<ID3D12RootSignature*> retainedRoots;
 };
@@ -484,6 +505,21 @@ struct ProgramBinding
     RyuboxD12BindingInfo info;
     D3D_SHADER_INPUT_TYPE inputType;
     UINT table, tableOffset;
+};
+struct BindingKey
+{
+    UINT stage, type, space, binding;
+    bool operator==(const BindingKey&) const = default;
+};
+struct BindingKeyHash
+{
+    size_t operator()(const BindingKey& key) const noexcept
+    {
+        size_t hash = key.stage;
+        hash = hash * 16777619u ^ key.type;
+        hash = hash * 16777619u ^ key.space;
+        return hash * 16777619u ^ key.binding;
+    }
 };
 struct Program
 {
@@ -501,6 +537,7 @@ struct Program
     std::vector<RyuboxD12VertexInput> inputs;
     std::vector<RyuboxD12SOElement> streamOutputs;
     std::vector<std::pair<UINT, UINT>> tables; // stage, sampler/non-sampler
+    std::vector<UINT> tableSizes;
     std::map<std::string, ComPtr<ID3D12PipelineState>> graphics;
 };
 
@@ -547,7 +584,7 @@ public:
     };
     DescriptorPool viewPool, samplerPool;
     RyuboxD3D12DescriptorStats descriptorStats{};
-    RyuboxD3D12PerformanceStats performanceStats{sizeof(RyuboxD3D12PerformanceStats), 1};
+    RyuboxD3D12PerformanceStats performanceStats{sizeof(RyuboxD3D12PerformanceStats), 3};
     bool descriptorRingEnabled = true;
     ID3D12DescriptorHeap* boundViewHeap = nullptr;
     ID3D12DescriptorHeap* boundSamplerHeap = nullptr;
@@ -1172,6 +1209,8 @@ public:
         frame.retainedRoots.clear();
         frame.samplerCount = 0;
         frame.samplerGroups.clear();
+        frame.bindingGroups.clear();
+        frame.bindingGroupLookup.clear();
         frame.rtvCount = 0;
         frame.dsvCount = 0;
         frame.roots.clear();
@@ -1412,26 +1451,37 @@ public:
         pendingUnfenced = true;
         TraceD3D12("submit:present-begin");
         QueryPerformanceCounter(&presentStart);
-        HRESULT presentResult = present && swapchain ? swapchain->Present(interval, 0) : S_OK;
+        const bool hasPresentTarget = present && swapchain != nullptr;
+        HRESULT presentResult = hasPresentTarget ? swapchain->Present(interval, 0) : S_OK;
         QueryPerformanceCounter(&presentEnd);
+        if (hasPresentTarget)
+        {
+            ++performanceStats.presentAttempts;
+            performanceStats.lastPresentResult = presentResult;
+            performanceStats.lastPresentWidth = width;
+            performanceStats.lastPresentHeight = height;
+            performanceStats.lastPresentQpc = static_cast<uint64_t>(presentEnd.QuadPart);
+            if (SUCCEEDED(presentResult)) ++performanceStats.presentSuccess;
+        }
         TraceD3D12("submit:present-end");
         const UINT64 value = submitted + 1;
         TraceD3D12("submit:signal-begin");
         Check(queue->Signal(fence.Get(), value));
         TraceD3D12("submit:signal-end");
         submitted = frames[frameIndex].fence = value;
+        if (hasPresentTarget) performanceStats.lastPresentFence = value;
         pendingUnfenced = false;
         // D3D12 buffers decay to COMMON at ExecuteCommandLists boundaries,
         // including buffers explicitly transitioned on a DIRECT queue.
         for (auto& resource : frames[frameIndex].retained)
             if (resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER)
                 resource->state = D3D12_RESOURCE_STATE_COMMON;
-        Check(presentResult);
-        Check(device->GetDeviceRemovedReason());
-        CheckDebug();
         QueryPerformanceCounter(&submitEnd);
         performanceStats.submitMicroseconds += ElapsedMicroseconds(submitStart, submitEnd);
         performanceStats.presentMicroseconds += ElapsedMicroseconds(presentStart, presentEnd);
+        Check(presentResult);
+        Check(device->GetDeviceRemovedReason());
+        CheckDebug();
         return value;
     }
 
@@ -1447,7 +1497,9 @@ public:
     UploadSlice Upload(UINT64 bytes, UINT64 alignment)
     {
         const UINT64 budget = UploadBudgetLimit();
-        Require(recording && bytes && bytes <= budget);
+        Require(recording, HRESULT_FROM_WIN32(ERROR_INVALID_STATE), "Upload requires an open command list.");
+        Require(bytes && bytes <= budget, E_INVALIDARG,
+            "Upload bytes=" + std::to_string(bytes) + "; budget=" + std::to_string(budget));
         auto& pages = frames[frameIndex].uploads;
         for (auto& page : pages)
         {
@@ -1472,7 +1524,12 @@ public:
                     TrimUploadPages(frames[i]);
             }
         }
-        Require(Fits(uploadBytes, capacity, budget), E_OUTOFMEMORY);
+        // No copy/state mutation has happened yet. The GAL can submit, wait
+        // for its fence and retry on a fresh list. Real allocation failures
+        // remain fatal; only this bounded-pool pressure is recoverable.
+        Require(Fits(uploadBytes, capacity, budget), HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA),
+            "Upload pool pressure: reserved=" + std::to_string(uploadBytes) +
+            "; requested=" + std::to_string(capacity) + "; budget=" + std::to_string(budget));
         UploadPage page;
         auto heap = Heap(D3D12_HEAP_TYPE_UPLOAD);
         auto desc = BufferDesc(capacity);
@@ -2188,6 +2245,52 @@ float4 PS(Vertex v) : SV_Target { return image.Sample(nearestClamp, v.uv); }
         readback->Unmap(0, &noWrite);
     }
 
+    // Guest-memory callbacks may run on a CPU thread while the GPU owner has
+    // an unsubmitted command list open. Read only the last submitted contents:
+    // buffers decay to COMMON after each DIRECT-list submission, so a separate
+    // DIRECT list can implicitly promote the source for this copy. The pending
+    // graphics list is neither submitted nor reset here.
+    void ReadSubmittedBuffer(const std::shared_ptr<Resource>& resource, UINT64 offset,
+        void* destination, UINT64 size)
+    {
+        Require(destination && size && resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER);
+        Require(Fits(offset, size, resource->desc.Width));
+        if (!recording)
+        {
+            Read(resource, offset, destination, size, false);
+            return;
+        }
+
+        ComPtr<ID3D12Resource> readback;
+        auto heap = Heap(D3D12_HEAP_TYPE_READBACK);
+        auto desc = BufferDesc(size);
+        Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)));
+
+        ComPtr<ID3D12CommandAllocator> allocator;
+        ComPtr<ID3D12GraphicsCommandList> list;
+        Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)));
+        Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(),
+            nullptr, IID_PPV_ARGS(&list)));
+        list->CopyBufferRegion(readback.Get(), 0, resource->object.Get(), offset, size);
+        Check(list->Close());
+        ID3D12CommandList* lists[] = {list.Get()};
+        queue->ExecuteCommandLists(1, lists);
+        // Advance the same fence timeline as Submit. The active graphics list
+        // will receive the next value when its owner eventually submits it.
+        UINT64 value = submitted + 1;
+        Check(queue->Signal(fence.Get(), value));
+        submitted = value;
+        Wait(value);
+
+        BYTE* mapped = nullptr;
+        D3D12_RANGE range{0, static_cast<SIZE_T>(size)};
+        Check(readback->Map(0, &range, reinterpret_cast<void**>(&mapped)));
+        memcpy(destination, mapped, static_cast<size_t>(size));
+        D3D12_RANGE noWrite{0, 0};
+        readback->Unmap(0, &noWrite);
+    }
+
     void ReadTexture(UINT64 id, UINT mip, void* destination, UINT64 size, UINT rowPitch, UINT depthPitch)
     {
         Require(!recording && destination && size, HRESULT_FROM_WIN32(ERROR_INVALID_STATE));
@@ -2374,6 +2477,7 @@ template<class F> HRESULT Invoke(void* pointer, F action, bool allowFault = fals
         bool isRecoverable = (failure.result == DXGI_ERROR_UNSUPPORTED ||
                               failure.result == E_INVALIDARG ||
                               failure.result == E_POINTER ||
+                              failure.result == HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_QUOTA) ||
                               failure.result == HRESULT_FROM_WIN32(ERROR_INVALID_STATE));
 
         if (!isRecoverable)
@@ -2487,7 +2591,7 @@ RYUBOX_D12 RyuboxD3D12_EndFrame(void* context, uint32_t interval, uint64_t* fenc
     HRESULT hr=Ryujinx::Uwp::Native::DrawD3D12FrontendOverlay(context);
     if (FAILED(hr)) return hr;
     bool presented=false;
-    hr=Invoke(context, [&](Context& c) { *fence=c.End(interval); presented=true; });
+    hr=Invoke(context, [&](Context& c) { *fence=c.End(interval); presented=c.swapchain != nullptr; });
     if (SUCCEEDED(hr) && presented) Ryujinx::Uwp::Native::NotifyD3D12FrontendPresent(context);
     return hr;
 }
@@ -2510,6 +2614,17 @@ RYUBOX_D12 RyuboxD3D12_CreateBuffer(void* context, uint64_t bytes, uint64_t* res
     return Invoke(context, [&](Context& c) { Require(bytes && bytes <= ResourceBudgetLimit()); auto desc = BufferDesc(bytes);
         desc.Flags = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS; auto resource = c.Allocate(desc);
         UINT64 id = c.nextResource++; c.resources.emplace(id, resource); *result = id; });
+}
+RYUBOX_D12 RyuboxD3D12_RetainBuffer(void* context, uint64_t source, uint64_t* result)
+{
+    if (!result) return E_POINTER; *result = 0;
+    return Invoke(context, [&](Context& c) {
+        auto resource = c.GetResource(source);
+        Require(resource->desc.Dimension == D3D12_RESOURCE_DIMENSION_BUFFER);
+        UINT64 id = c.nextResource++;
+        c.resources.emplace(id, resource);
+        *result = id;
+    });
 }
 RYUBOX_D12 RyuboxD3D12_CreateComputePipeline(void* context, const char* hlsl, uint64_t bytes, uint64_t* pipeline)
 {
@@ -2673,6 +2788,8 @@ RYUBOX_D12 RyuboxD3D12_DrawTexture(void* context, uint64_t resource, float left,
 { return Invoke(context, [&](Context& c) { c.DrawTexture(resource,left,top,right,bottom,flip); }); }
 RYUBOX_D12 RyuboxD3D12_ReadBuffer(void* context, uint64_t resource, uint64_t offset, void* destination, uint64_t bytes)
 { return Invoke(context, [&](Context& c) { c.Read(c.Get(resource,D3D12_RESOURCE_DIMENSION_BUFFER),offset,destination,bytes,false); }); }
+RYUBOX_D12 RyuboxD3D12_ReadSubmittedBuffer(void* context, uint64_t resource, uint64_t offset, void* destination, uint64_t bytes)
+{ return Invoke(context, [&](Context& c) { c.ReadSubmittedBuffer(c.Get(resource,D3D12_RESOURCE_DIMENSION_BUFFER),offset,destination,bytes); }); }
 RYUBOX_D12 RyuboxD3D12_Capture(void* context, void* destination, uint64_t bytes)
 { return Invoke(context, [&](Context& c) { Require(c.submitted > 0); c.Read(c.targets[c.lastTarget],0,destination,bytes,true); }); }
 RYUBOX_D12 RyuboxD3D12_GetLastDiagnostic(void* context, char* data, uint32_t capacity)
@@ -2738,7 +2855,10 @@ RYUBOX_D12 RyuboxD3D12_GetDescriptorStats(void* c, RyuboxD3D12DescriptorStats* s
 RYUBOX_D12 RyuboxD3D12_GetPerformanceStats(void* c, RyuboxD3D12PerformanceStats* stats)
 {
     if (!stats || stats->size != sizeof(*stats)) return E_INVALIDARG;
-    return Invoke(c,[&](Context& ctx) { *stats = ctx.performanceStats; },true);
+    return Invoke(c,[&](Context& ctx) {
+        *stats = ctx.performanceStats;
+        stats->presentationTarget = ctx.swapchain ? (ctx.composition ? 2u : 1u) : 0u;
+    },true);
 }
 RYUBOX_D12 RyuboxD3D12_GetProgramBindings(void* c, uint64_t id, RyuboxD12BindingInfo* data, uint32_t* count)
 {
@@ -2833,11 +2953,23 @@ RYUBOX_D12 RyuboxD3D12_ConfigureStreamOutput(void* c,uint64_t id,uint32_t stage,
 { return Invoke(c,[&](Context& ctx) { ctx.ConfigureStreamOutput(id,stage,data,count); }); }
 
 RYUBOX_D12 RyuboxD3D12_BeginCommands(void* c)
-{ return Invoke(c,[](Context& ctx) { ctx.BeginCommands(); }); }
+{ return Invoke(c,[](Context& ctx) { if (!ctx.recording) ctx.BeginCommands(); }); }
 RYUBOX_D12 RyuboxD3D12_Flush(void* c,uint64_t* fence)
 { if(!fence) return E_POINTER; return Invoke(c,[&](Context& ctx) { *fence=ctx.recording ? ctx.Submit(false,0) : ctx.submitted; }); }
 RYUBOX_D12 RyuboxD3D12_MemoryBarrier(void* c)
-{ return Invoke(c,[](Context& ctx) { Require(ctx.recording); D3D12_RESOURCE_BARRIER b{}; b.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV; ctx.commands->ResourceBarrier(1,&b); }); }
+{ return Invoke(c,[](Context& ctx) {
+    // A guest barrier may be the first command after a readback/present closed
+    // the native list. Keep the barrier on the direct queue, in order, instead
+    // of failing the emulation thread because the list is temporarily closed.
+    if (!ctx.recording)
+    {
+        OutputDebugStringA("[RyuboxD3D12] MemoryBarrier reopened a closed command list.\n");
+        ctx.BeginCommands();
+    }
+    D3D12_RESOURCE_BARRIER b{};
+    b.Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    ctx.commands->ResourceBarrier(1,&b);
+}); }
 RYUBOX_D12 RyuboxD3D12_ClearTexture(void* c,uint64_t id,const float* color)
 { if(!color) return E_POINTER; return Invoke(c,[&](Context& ctx) { auto view=ctx.TargetView(id); ctx.commands->ClearRenderTargetView(view,color,0,nullptr); }); }
 RYUBOX_D12 RyuboxD3D12_CopyTexture(void* c,uint64_t src,uint64_t dst,uint32_t sx,uint32_t sy,uint32_t dx,uint32_t dy,uint32_t w,uint32_t h)

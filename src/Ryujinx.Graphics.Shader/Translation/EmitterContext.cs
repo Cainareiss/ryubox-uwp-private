@@ -312,6 +312,20 @@ namespace Ryujinx.Graphics.Shader.Translation
                 }
                 this.Store(StorageKind.Output, IoVariable.Position, null, Const(1), normalizedY);
             }
+            else if (TranslatorContext.Options.TargetApi == TargetApi.Direct3D12)
+            {
+                // Vulkan/GAL supports a signed viewport height. D3D12 must
+                // use a positive extent, so preserve the mapping in clip space.
+                // A positive GAL height maps -Y to the top; D3D maps +Y there.
+                // Negative GAL heights already agree with Direct3D.
+                for (int component = 0; component < 2; component++)
+                {
+                    Operand position = this.Load(StorageKind.Output, IoVariable.Position, null, Const(component));
+                    Operand sign = this.Load(StorageKind.ConstantBuffer, SupportBuffer.Binding,
+                        Const((int)SupportBufferField.ViewportInverse), Const(component));
+                    this.Store(StorageKind.Output, IoVariable.Position, null, Const(component), this.FPMultiply(position, sign));
+                }
+            }
 
             if (TranslatorContext.Definitions.DepthMode && !TranslatorContext.GpuAccessor.QueryHostSupportsDepthClipControl())
             {
@@ -325,7 +339,7 @@ namespace Ryujinx.Graphics.Shader.Translation
 
         public void PrepareForVertexReturn(out Operand oldXLocal, out Operand oldYLocal, out Operand oldZLocal)
         {
-            if (TranslatorContext.Definitions.ViewportTransformDisable)
+            if (TranslatorContext.Definitions.ViewportTransformDisable || TranslatorContext.Options.TargetApi == TargetApi.Direct3D12)
             {
                 oldXLocal = Local();
                 this.Copy(oldXLocal, this.Load(StorageKind.Output, IoVariable.Position, null, Const(0)));

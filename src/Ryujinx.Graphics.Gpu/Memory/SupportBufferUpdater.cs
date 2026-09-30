@@ -154,15 +154,21 @@ namespace Ryujinx.Graphics.Gpu.Memory
         /// <param name="viewportHeight">Value used as viewport height</param>
         /// <param name="scale">Render target scale</param>
         /// <param name="disableTransform">True if transform is disabled, false otherwise</param>
-        public void SetViewportTransformDisable(float viewportWidth, float viewportHeight, float scale, bool disableTransform)
+        public void SetViewportTransformDisable(float viewportWidth, float viewportHeight, float scale, bool disableTransform, bool d3d12Orientation = false)
         {
             float disableTransformF = disableTransform ? 1.0f : 0.0f;
-            if (_data.ViewportInverse.W != disableTransformF || disableTransform)
+            // With transform enabled these components carry clip-space signs
+            // for D3D12's positive native viewport. They must update even when
+            // the transform-enable bit itself has not changed between draws.
+            float x = d3d12Orientation && !disableTransform ? D3D12ViewportOrientation.ClipXSign(viewportWidth) : scale * 2f / viewportWidth;
+            float y = d3d12Orientation && !disableTransform ? D3D12ViewportOrientation.ClipYSign(viewportHeight) : scale * 2f / viewportHeight;
+            if (_data.ViewportInverse.W != disableTransformF || disableTransform ||
+                d3d12Orientation && (_data.ViewportInverse.X != x || _data.ViewportInverse.Y != y))
             {
                 UpdateViewportInverse(new Vector4<float>
                 {
-                    X = scale * 2f / viewportWidth,
-                    Y = scale * 2f / viewportHeight,
+                    X = x,
+                    Y = y,
                     Z = 1,
                     W = disableTransformF,
                 });

@@ -63,6 +63,17 @@ namespace Ryujinx.HLE.HOS.Kernel
         private readonly ulong _memoryCommitPageSize;
         private long _guestCommittedBytes;
 
+        public long GuestCommittedBytes
+        {
+            get
+            {
+                lock (_memoryCommitLock)
+                {
+                    return _guestCommittedBytes;
+                }
+            }
+        }
+
         public KernelContext(
             ITickSource tickSource,
             Switch device,

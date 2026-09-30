@@ -17,6 +17,7 @@ using Ryujinx.Common.Logging.Targets;
 using Ryujinx.Common.Memory;
 using Ryujinx.Cpu;
 using Ryujinx.Graphics.GAL;
+using Ryujinx.Graphics.Gpu;
 using Ryujinx.Graphics.D3D11;
 using Ryujinx.Graphics.D3D12;
 using Ryujinx.Graphics.Gpu.Engine.GPFifo;
@@ -117,6 +118,9 @@ namespace Ryujinx.Uwp.CoreHost
         private static long _pokemonRepeatedFrameCount;
         private static long _lastNativePresentSuccess;
         private static long _lastNativePresentAttempts;
+        private static long _lastD3D12PresentSuccess;
+        private static long _lastD3D12PresentAttempts;
+        private static long _d3d12SessionPresentBaseline;
         private static long _lastNativeCopySuccess;
         private static long _lastNativeUploadSuccess;
         private static long _nextSessionId;
@@ -125,6 +129,7 @@ namespace Ryujinx.Uwp.CoreHost
         private static int _deviceLost;
         private static readonly long D3D11CaptureMinimumSequence = ReadD3D11CaptureMinimumSequence();
         private static readonly long D3D12CaptureMinimumSequence = ReadD3D12CaptureMinimumSequence();
+        private static readonly long D3D12CaptureSeriesInterval = ReadD3D12CaptureSeriesInterval();
         private static D3D11SpirvCrossCompiler _d3d11SpirvCompiler;
         private static ulong _activeProgramId;
         private static int _bootAssetMask;
@@ -171,6 +176,15 @@ namespace Ryujinx.Uwp.CoreHost
             return long.TryParse(value, out long sequence)
                 ? Math.Clamp(sequence, 1, 100000)
                 : DefaultSequence;
+        }
+
+        private static long ReadD3D12CaptureSeriesInterval()
+        {
+            const long DefaultInterval = 300;
+            string value = Environment.GetEnvironmentVariable("RYUJINX_UWP_D3D12_CAPTURE_SERIES_INTERVAL");
+            return long.TryParse(value, out long interval)
+                ? Math.Clamp(interval, 1, 1800)
+                : DefaultInterval;
         }
 
         [UnmanagedCallersOnly(
@@ -249,6 +263,18 @@ namespace Ryujinx.Uwp.CoreHost
                 // validated directly before it becomes the global session handle.
                 AppContext.SetSwitch("Ryujinx.Uwp.UseCreateFileFromApp", true);
                 _activeSettings = CoreHostSettings.FromJson(serializedSettings);
+                GraphicsConfig.ResScale = _activeSettings.ResolutionScale;
+                // The upstream per-title shader cache is separate from the
+                // native DXBC cache. Opt in only for D3D12 diagnostics until
+                // its loading and memory cost are validated on Xbox.
+                GraphicsConfig.EnableShaderCache =
+                    string.Equals(selectedBackend, "D3D12", StringComparison.OrdinalIgnoreCase) &&
+                    _activeSettings.ShaderCache;
+                CoreHostLog.Write("graphics",
+                    $"Guest shader cache enabled={GraphicsConfig.EnableShaderCache}; backend={selectedBackend}");
+                CoreHostLog.Write(
+                    "graphics",
+                    string.Format("Internal resolution scale applied before game GPU creation: {0:F2}x", GraphicsConfig.ResScale));
                 // The ABI argument is the renderer selected by the frontend
                 // for this exact session.  Keep it authoritative: older
                 // snapshots always serialized D3D11 and used to silently
@@ -282,6 +308,8 @@ namespace Ryujinx.Uwp.CoreHost
                 Interlocked.Exchange(ref _pokemonRepeatedFrameCount, 0);
                 Interlocked.Exchange(ref _lastNativePresentSuccess, 0);
                 Interlocked.Exchange(ref _lastNativePresentAttempts, 0);
+                Interlocked.Exchange(ref _lastD3D12PresentSuccess, 0);
+                Interlocked.Exchange(ref _lastD3D12PresentAttempts, 0);
                 Interlocked.Exchange(ref _lastNativeCopySuccess, 0);
                 Interlocked.Exchange(ref _lastNativeUploadSuccess, 0);
                 ResetStartupTelemetry();
@@ -340,6 +368,23 @@ namespace Ryujinx.Uwp.CoreHost
                     stage = "inicializando AppDataManager";
                     AppDataManager.Initialize(baseDirectory);
                     CoreHostLog.Write("bootstrap", "AppDataManager initialized at " + AppDataManager.BaseDirPath);
+
+                    if (string.Equals(selectedBackend, "D3D12", StringComparison.OrdinalIgnoreCase))
+                    {
+                        try
+                        {
+                            string cacheDirectory = D3D12CacheDirectory.Prepare(AppDataManager.BaseDirPath);
+                            Environment.SetEnvironmentVariable("RYUJINX_UWP_D3D12_CACHE_DIR", cacheDirectory);
+                            CoreHostLog.Write("graphics", "Native DXBC cache writable: " + cacheDirectory +
+                                "; independent of guest shaderCache setting");
+                        }
+                        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is ArgumentException)
+                        {
+                            // Persistence is optional; never fail game startup for a cache path.
+                            Environment.SetEnvironmentVariable("RYUJINX_UWP_D3D12_CACHE_DIR", null);
+                            CoreHostLog.Write("graphics", "Native DXBC cache path setup failed: " + exception.Message);
+                        }
+                    }
 
                     stage = "copiando e carregando prod.keys/title.keys";
                     CopyKeysIntoAppData(keys);
@@ -575,6 +620,12 @@ namespace Ryujinx.Uwp.CoreHost
                             CoreHostLog.Write("presentation", $"[Session {sessionId}] D3D12 frontend lease acquired; shared SwapChainPanel; no D3D11 fallback");
                         }
                         renderer = d3d12Renderer;
+                        // The shared context already contains frontend presents.
+                        // Snapshot before publishing the renderer to UI readers.
+                        var initialPresentation = d3d12Renderer.Device.GetPerformanceStats();
+                        Interlocked.Exchange(ref _d3d12SessionPresentBaseline, checked((long)initialPresentation.PresentSuccess));
+                        Interlocked.Exchange(ref _lastD3D12PresentSuccess, checked((long)initialPresentation.PresentSuccess));
+                        Interlocked.Exchange(ref _lastD3D12PresentAttempts, checked((long)initialPresentation.PresentAttempts));
                         _d3d12SessionRenderer = d3d12Renderer;
                         _d3d12HandoffFailed = false;
                         if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("RYUJINX_UWP_CAPTURE_FRAME_PATH")))
@@ -654,13 +705,10 @@ namespace Ryujinx.Uwp.CoreHost
                     // is the private SoftwarePageTable backing below, not changing
                     // the memory contract visible to games.
                     MemoryConfiguration memoryConfiguration = MemoryConfiguration.MemoryConfiguration4GiB;
-                    CoreHostLog.Write(
-                        "memory",
-                        string.Format(
-                            "Selected guest memory arrangement={0}; currentHostLimit={1} MiB, expectedHostLimit={2} MiB",
-                            memoryConfiguration,
-                            appMemoryUsageLimit / (1024UL * 1024UL),
-                            expectedAppMemoryUsageLimit / (1024UL * 1024UL)));
+                    // Do not infer expanded guest DRAM from a title/path or the
+                    // host budget override. Games size their heaps from this
+                    // arrangement: advertising 6 GiB can turn a retail-sized
+                    // allocation into a multi-GiB commit that cannot fit UWP.
                     string constrainedLocalTestMarker = Path.Combine(
                         AppDataManager.BaseDirPath,
                         "local-test-2gb-memory.txt");
@@ -676,6 +724,14 @@ namespace Ryujinx.Uwp.CoreHost
                             "Local constrained-memory marker detected; using the 2 GiB application pool for this run");
                     }
 
+                    CoreHostLog.Write(
+                        "memory",
+                        string.Format(
+                            "Selected guest memory arrangement={0}; currentHostLimit={1} MiB, expectedHostLimit={2} MiB",
+                            memoryConfiguration,
+                            appMemoryUsageLimit / (1024UL * 1024UL),
+                            expectedAppMemoryUsageLimit / (1024UL * 1024UL)));
+
                     bool localPerformanceTest = string.Equals(
                         Environment.GetEnvironmentVariable("RYUJINX_UWP_LOCAL_PERFORMANCE_TEST"),
                         "1",
@@ -687,16 +743,29 @@ namespace Ryujinx.Uwp.CoreHost
                     // dense control flow (Rivals crossed the host boundary more
                     // than 235 million times before its first useful frame).
                     //
-                    // The normal profile uses the existing epoch reclaimer and
-                    // publishes baseline translations in the native function
-                    // table. Retired code is released only after all registered
-                    // guest readers pass a dispatch boundary, preserving lifetime
-                    // safety without forcing every branch through managed code.
-                    bool usePinnedSafeJit = string.Equals(
-                        Environment.GetEnvironmentVariable("RYUJINX_UWP_FORCE_PINNED_SAFE_JIT"),
+                    // Epoch dispatch can only reclaim cold translations after
+                    // every native guest reader crosses a safe boundary. Under
+                    // Xbox's tight process commit budget, allocation can fail
+                    // inside that reader, so recovery cannot immediately reuse
+                    // the retired code. Prefer pinned dispatch on device builds;
+                    // retain an explicit opt-out for controlled perf diagnostics.
+                    bool usePinnedSafeJit = rivalsPerformanceProfile || !string.Equals(
+                        Environment.GetEnvironmentVariable("RYUJINX_UWP_FAST_EPOCH_JIT"),
                         "1",
                         StringComparison.OrdinalIgnoreCase);
                     bool useSafeJit = usePinnedSafeJit;
+                    // Local diagnostics can isolate block-poll instrumentation
+                    // from pin/epoch ownership without changing either default.
+                    // This is not a shipping per-title workaround.
+                    if (localPerformanceTest)
+                    {
+                        string safeJitOverride = Environment.GetEnvironmentVariable("RYUJINX_UWP_TEST_SAFE_JIT");
+                        if (safeJitOverride == "0" || safeJitOverride == "1")
+                        {
+                            useSafeJit = safeJitOverride == "1";
+                            CoreHostLog.Write("performance", $"Local JIT diagnostic override: safeJit={useSafeJit}, pinnedDispatch={usePinnedSafeJit}");
+                        }
+                    }
                     bool useNativeDispatch = !string.Equals(
                         Environment.GetEnvironmentVariable("RYUJINX_UWP_MANAGED_PINNED_DISPATCH"),
                         "1", StringComparison.Ordinal);
@@ -714,6 +783,22 @@ namespace Ryujinx.Uwp.CoreHost
                         Environment.GetEnvironmentVariable("RYUJINX_UWP_DEEP_TRACE"),
                         "1",
                         StringComparison.OrdinalIgnoreCase);
+                    // Pinned dispatch returns every guest call/jump to the host
+                    // dispatcher, so there is no nested native guest call stack
+                    // for the recursion guard to protect. A compatibility run
+                    // matching this flat call flow, together with stable JIT
+                    // retention, restored Pokemon Z-A's initialization path.
+                    // Epoch/native dispatch still nests translated calls and
+                    // retains the upstream guard.
+                    bool enableDeepCallProtection = !usePinnedSafeJit;
+                    if (localPerformanceTest)
+                    {
+                        string deepCallOverride = Environment.GetEnvironmentVariable("RYUJINX_UWP_TEST_DEEP_CALL_PROTECTION");
+                        if (deepCallOverride == "0" || deepCallOverride == "1")
+                        {
+                            enableDeepCallProtection = deepCallOverride == "1";
+                        }
+                    }
 
                     AppContext.SetSwitch("Ryujinx.Uwp.SingleAddressSpaceView", false);
                     AppContext.SetSwitch("Ryujinx.Uwp.LazyGuestCommit", true);
@@ -726,7 +811,8 @@ namespace Ryujinx.Uwp.CoreHost
                     // Reserve additional regions lazily, subject to JitCache's
                     // process-budget admission check. Always assign this per
                     // session so a previous title cannot change the next limit.
-                    AppContext.SetData("Ryujinx.Uwp.JitCacheMaxRegions", 6);
+                    AppContext.SetData("Ryujinx.Uwp.JitCacheMaxRegions", 8);
+                    AppContext.SetSwitch("Ryujinx.Uwp.D3D12DisableGuestCounters", true);
                     AppContext.SetSwitch("Ryujinx.Uwp.SafeAudioRenderer", true);
                     AppContext.SetSwitch("Ryujinx.Uwp.AudioPcmStartupGuard", true);
                     // D3D11 performs implicit resource hazard tracking. The
@@ -744,10 +830,11 @@ namespace Ryujinx.Uwp.CoreHost
                     AppContext.SetSwitch("Ryujinx.Uwp.DeepTrace", deepTraceEnabled);
                     ARMeilleure.Optimizations.UseUnmanagedDispatchLoop = useNativeDispatch;
                     ARMeilleure.Optimizations.AllowLcqInFunctionTable = !usePinnedSafeJit;
+                    ARMeilleure.Optimizations.EnableDeepCallRecursionProtection = enableDeepCallProtection;
                     CoreHostLog.Write(
                         "scheduler",
                         string.Format(
-                            "ARMeilleure applied config: safeJit={0}, unmanagedDispatch={1}, allowLcqInTable={2}, backgroundThreads={3}, highCqEnabled={4}; pinnedDispatch={5}; dispatchPolicy={6}",
+                            "ARMeilleure applied config: safeJit={0}, unmanagedDispatch={1}, allowLcqInTable={2}, backgroundThreads={3}, highCqEnabled={4}; pinnedDispatch={5}; dispatchPolicy={6}; deepCallProtection={7}; flatPinnedCallFlow={8}",
                             useSafeJit,
                             ARMeilleure.Optimizations.UseUnmanagedDispatchLoop,
                             ARMeilleure.Optimizations.AllowLcqInFunctionTable,
@@ -758,12 +845,14 @@ namespace Ryujinx.Uwp.CoreHost
                                 ? "native-pinned-v2"
                                 : rivalsPerformanceProfile
                                     ? "rivals-native-epoch-baseline-v2"
-                                    : "native-epoch-baseline-v1"));
+                                    : "native-epoch-baseline-v1",
+                            ARMeilleure.Optimizations.EnableDeepCallRecursionProtection,
+                            usePinnedSafeJit && !ARMeilleure.Optimizations.EnableDeepCallRecursionProtection));
                     if (rivalsPerformanceProfile)
                     {
                         CoreHostLog.Write(
                             "scheduler",
-                            "Rivals startup profile applied: native LCQ dispatch, background High-CQ disabled, JIT hard cap=768 MiB");
+                            "Rivals startup profile applied: pinned native dispatch, background High-CQ disabled, process JIT admission and eviction enabled");
                     }
                     CoreHostLog.Write(
                         "memory",
@@ -1326,6 +1415,21 @@ namespace Ryujinx.Uwp.CoreHost
             CallConvs = new[] { typeof(CallConvStdcall) })]
         public static int HasFirstVisiblePresent()
         {
+            // A successful DXGI Present is the strongest signal available at
+            // this boundary, but it is not proof that a physical display showed
+            // non-black pixels. Keep the historical export name for ABI users.
+            if (string.Equals(_activeSettings?.Backend, "D3D12", StringComparison.OrdinalIgnoreCase))
+            {
+                D3D12Renderer renderer = Volatile.Read(ref _d3d12SessionRenderer);
+                if (renderer == null) return 0;
+                // Guest callback and a new native present are both required;
+                // frontend frames must never dismiss the game's boot overlay.
+                if (Interlocked.Read(ref _presentedFrameCount) == 0) return 0;
+                try { return renderer.Device.GetPerformanceStats().PresentSuccess >
+                    (ulong)Math.Max(0, Interlocked.Read(ref _d3d12SessionPresentBaseline)) ? 1 : 0; }
+                catch { return 0; }
+            }
+
             return Interlocked.Read(ref _presentedFrameCount) > 0 ? 1 : 0;
         }
 
@@ -1642,6 +1746,11 @@ namespace Ryujinx.Uwp.CoreHost
             CancellationTokenSource watchdogStop = new();
             CancellationToken token = watchdogStop.Token;
             long watchdogSessionId = ActiveSessionId;
+            // A loading animation can present forever while a guest worker is
+            // stuck. Opt-in desktop diagnostics must survive that first frame;
+            // keep the normal startup-only behavior for packaged builds.
+            bool monitorAfterFirstFrame = UseLocalWin32Surface() &&
+                Environment.GetEnvironmentVariable("RYUJINX_UWP_SESSION_WATCHDOG") == "1";
             Thread watchdogThread = new Thread(() =>
             {
                 long previousIterations = -1;
@@ -1792,7 +1901,7 @@ namespace Ryujinx.Uwp.CoreHost
                             gpfifoTelemetry,
                             d3d11WindowTelemetry));
 
-                    if (presented > 0)
+                    if (presented > 0 && !monitorAfterFirstFrame)
                     {
                         CoreHostLog.Write("watchdog", "Startup watchdog completed after first guest frame");
                         return;
@@ -1840,10 +1949,44 @@ namespace Ryujinx.Uwp.CoreHost
             CoreHostLog.Write("watchdog", "Startup watchdog started before LoadNsp");
         }
 
-        private static string GetNativePresentationDelta()
+        private static string GetNativePresentationDelta(long elapsedMilliseconds, out double acceptedPresentFps)
         {
+            acceptedPresentFps = 0;
             try
             {
+                if (Volatile.Read(ref _d3d12SessionRenderer) is D3D12Renderer d3d12Renderer)
+                {
+                    D3D12PerformanceStats d3d12Telemetry = d3d12Renderer.Device.GetPerformanceStats();
+                    long previousSuccess = Interlocked.Exchange(ref _lastD3D12PresentSuccess, checked((long)d3d12Telemetry.PresentSuccess));
+                    long previousD3D12Attempts = Interlocked.Exchange(ref _lastD3D12PresentAttempts, checked((long)d3d12Telemetry.PresentAttempts));
+                    ulong successDelta = d3d12Telemetry.PresentSuccess - (ulong)Math.Max(0, previousSuccess);
+                    ulong attemptsDelta = d3d12Telemetry.PresentAttempts - (ulong)Math.Max(0, previousD3D12Attempts);
+                    string presentationTarget = d3d12Telemetry.PresentationTarget switch
+                    {
+                        1 => "hwnd",
+                        2 => "composition-panel",
+                        _ => "offscreen",
+                    };
+                    if (elapsedMilliseconds > 0) acceptedPresentFps = successDelta * 1000.0 / elapsedMilliseconds;
+                    return string.Format(
+                        "d3d12Present={0}/{1}, d3d12PresentSequence={2}, d3d12LastPresent=0x{3:X8}, d3d12LastPresentFence={4}, d3d12PresentQpc={5}, qpcFrequency={6}, d3d12Target={7}, d3d12Surface={8}x{9}",
+                        successDelta,
+                        attemptsDelta,
+                        d3d12Telemetry.PresentSuccess,
+                        d3d12Telemetry.LastPresentResult,
+                        d3d12Telemetry.LastPresentFence,
+                        d3d12Telemetry.LastPresentQpc,
+                        System.Diagnostics.Stopwatch.Frequency,
+                        presentationTarget,
+                        d3d12Telemetry.LastPresentWidth,
+                        d3d12Telemetry.LastPresentHeight);
+                }
+
+                if (!string.Equals(_activeSettings?.Backend, "D3D11", StringComparison.OrdinalIgnoreCase))
+                {
+                    return "nativePresentTelemetry=unavailable";
+                }
+
                 int result = Native_D3D11_GetPresentationTelemetry(out D3D11PresentationTelemetry telemetry);
                 if (result < 0)
                 {
@@ -1854,6 +1997,8 @@ namespace Ryujinx.Uwp.CoreHost
                 long previousAttempts = Interlocked.Exchange(ref _lastNativePresentAttempts, checked((long)telemetry.PresentAttempts));
                 long previousCopy = Interlocked.Exchange(ref _lastNativeCopySuccess, checked((long)telemetry.CopySuccess));
                 long previousUpload = Interlocked.Exchange(ref _lastNativeUploadSuccess, checked((long)telemetry.UploadSuccess));
+                ulong presentDelta = telemetry.PresentSuccess - (ulong)Math.Max(0, previousPresent);
+                if (elapsedMilliseconds > 0) acceptedPresentFps = presentDelta * 1000.0 / elapsedMilliseconds;
                 return string.Format(
                     "nativePresent={0}/{1}, nativeCopy={2}, nativeUpload={3}, lastPresent=0x{4:X8}",
                     telemetry.PresentSuccess - (ulong)Math.Max(0, previousPresent),
@@ -1921,6 +2066,8 @@ namespace Ryujinx.Uwp.CoreHost
             long descriptorSampleMilliseconds = intervalStartMilliseconds;
             D3D12DescriptorStats previousDescriptorStats = default;
             D3D12PerformanceStats previousPerformanceStats = default;
+            D3D12PerformanceStats startupPerformanceStats = default;
+            const long StartupDrawTraceLimit = 64;
 
             Switch initializedSwitch = _switch;
             long sessionId = ActiveSessionId;
@@ -1948,6 +2095,12 @@ namespace Ryujinx.Uwp.CoreHost
                 }
 
                 initializedSwitch.Gpu.SetGpuThread();
+                if (_d3d12SessionRenderer is D3D12Renderer sessionRenderer)
+                {
+                    previousPerformanceStats = sessionRenderer.Device.GetPerformanceStats();
+                    startupPerformanceStats = previousPerformanceStats;
+                    previousDescriptorStats = sessionRenderer.Device.GetDescriptorStats();
+                }
                 CoreHostLog.Write("session", "GPU thread registered");
                 initializedSwitch.Gpu.InitializeShaderCache(runStop.Token);
                 CoreHostLog.Write("session", "Shader cache initialized; entering FIFO loop");
@@ -1979,7 +2132,7 @@ namespace Ryujinx.Uwp.CoreHost
                     {
                         long frameNumber = processedFrameCount + 1;
                         long processFrameStart = Environment.TickCount64;
-                        if (frameNumber <= 4)
+                        if (frameNumber <= 32)
                         {
                             CoreHostLog.Write(
                                 "session",
@@ -1994,7 +2147,29 @@ namespace Ryujinx.Uwp.CoreHost
                         intervalProcessedFrames++;
 
                         long processFrameElapsed = Environment.TickCount64 - processFrameStart;
-                        if (frameNumber <= 4 || processFrameElapsed >= 1000)
+                        if (presentedFrameCount < 10 &&
+                            _d3d12SessionRenderer is D3D12Renderer startupRenderer &&
+                            (frameNumber <= StartupDrawTraceLimit || processFrameElapsed >= 250))
+                        {
+                            // Keep this bounded to startup. It identifies whether a black
+                            // screen is spending its time compiling, binding, recording,
+                            // submitting, or waiting without forcing a fence/readback.
+                            D3D12PerformanceStats startupStats = startupRenderer.Device.GetPerformanceStats();
+                            CoreHostLog.Write(
+                                "d3d12-first-frame",
+                                $"processed={frameNumber}; elapsedMs={processFrameElapsed}; " +
+                                $"drawsDelta={startupStats.DrawCalls-startupPerformanceStats.DrawCalls}; passesDelta={startupStats.RenderPasses-startupPerformanceStats.RenderPasses}; " +
+                                $"shaderHitDelta={startupStats.ShaderCacheHits-startupPerformanceStats.ShaderCacheHits}; shaderMissDelta={startupStats.ShaderCacheMisses-startupPerformanceStats.ShaderCacheMisses}; " +
+                                $"shaderCompileUsDelta={startupStats.ShaderCompileMicroseconds-startupPerformanceStats.ShaderCompileMicroseconds}; " +
+                                $"psoHitDelta={startupStats.PsoCacheHits-startupPerformanceStats.PsoCacheHits}; psoCreateDelta={startupStats.PsoCreations-startupPerformanceStats.PsoCreations}; " +
+                                $"psoUsDelta={startupStats.PsoMicroseconds-startupPerformanceStats.PsoMicroseconds}; descriptorUsDelta={startupStats.DescriptorBindMicroseconds-startupPerformanceStats.DescriptorBindMicroseconds}; " +
+                                $"descriptorTableHitDelta={startupStats.DescriptorTableCacheHits-startupPerformanceStats.DescriptorTableCacheHits}; descriptorTableMissDelta={startupStats.DescriptorTableCacheMisses-startupPerformanceStats.DescriptorTableCacheMisses}; " +
+                                $"descriptorCopiesDelta={startupStats.DescriptorCopies-startupPerformanceStats.DescriptorCopies}; " +
+                                $"recordUsDelta={startupStats.RecordMicroseconds-startupPerformanceStats.RecordMicroseconds}; submitUsDelta={startupStats.SubmitMicroseconds-startupPerformanceStats.SubmitMicroseconds}; " +
+                                $"waitUsDelta={startupStats.FenceWaitMicroseconds-startupPerformanceStats.FenceWaitMicroseconds}; invalidPassDelta={startupStats.InvalidRenderPasses-startupPerformanceStats.InvalidRenderPasses}");
+                            startupPerformanceStats = startupStats;
+                        }
+                        if (frameNumber <= 32 || processFrameElapsed >= 1000)
                         {
                             CoreHostLog.Write(
                                 "session",
@@ -2022,7 +2197,7 @@ namespace Ryujinx.Uwp.CoreHost
 
                         bool captureSeries = Environment.GetEnvironmentVariable("RYUJINX_UWP_D3D12_CAPTURE_SERIES") == "1";
                         bool captureDue = captureSeries
-                            ? presentedFrameCount >= D3D12CaptureMinimumSequence && presentedFrameCount % 300 == 0
+                            ? presentedFrameCount >= D3D12CaptureMinimumSequence && presentedFrameCount % D3D12CaptureSeriesInterval == 0
                             : presentedFrameCount >= D3D12CaptureMinimumSequence;
                         if (Volatile.Read(ref _d3d12CaptureRenderer) is D3D12Renderer d3d12Renderer &&
                             captureDue &&
@@ -2052,9 +2227,20 @@ namespace Ryujinx.Uwp.CoreHost
                             CoreHostLog.Write(
                                 "session",
                                 string.Format(
-                                    "[Session {1}] FirstVisibleGuestPresent; elapsed={0} ms",
+                                    "[Session {1}] FirstGuestPresentCallback; elapsed={0} ms",
                                     Environment.TickCount64 - presentStart,
                                     sessionId));
+                        }
+                        else if (presentedFrameCount <= 32 || presentedFrameCount % 60 == 0)
+                        {
+                            CoreHostLog.Write(
+                                "session",
+                                string.Format(
+                                    "[Session {1}] Present {2} (processed={3}); elapsed={0} ms",
+                                    Environment.TickCount64 - presentStart,
+                                    sessionId,
+                                    presentedFrameCount,
+                                    processedFrameCount));
                         }
                     }
 
@@ -2083,11 +2269,22 @@ namespace Ryujinx.Uwp.CoreHost
                             "; " + ARMeilleure.Translation.Cache.JitCache.GetDetailedTelemetry());
                         double processedFps = intervalProcessedFrames * 1000.0 / elapsedMilliseconds;
                         double presentedFps = intervalPresentedFrames * 1000.0 / elapsedMilliseconds;
-                        string nativePresentation = GetNativePresentationDelta();
+                        string nativePresentation = GetNativePresentationDelta(elapsedMilliseconds, out double acceptedPresentFps);
+                        // Desktop harness only. Count successful native presents,
+                        // not FIFO iterations or guest callbacks. Reuse the GPU
+                        // owner's sample; do not query the device from a UI worker.
+                        if (_localWindowHandle != IntPtr.Zero &&
+                            Environment.GetEnvironmentVariable("RYUJINX_UWP_LOCAL_WINDOW_FPS") == "1")
+                        {
+                            // Post, rather than synchronously SendMessage via
+                            // SetWindowText, so a busy UI never stalls the GPU.
+                            Native_PostMessage(_localWindowHandle, 0x8029,
+                                (IntPtr)(long)Math.Round(acceptedPresentFps * 10), IntPtr.Zero);
+                        }
                         CoreHostLog.Write(
                             "performance",
                             string.Format(
-                                "FPS backend={0} callbacks={1:F1}, processed={2:F1}, totalCallbacks={3}, totalProcessed={4}, loopIterations={5}, workingSet={6}; {7}",
+                                "FPS backend={0} callbacks={1:F1}, processed={2:F1}, totalCallbacks={3}, totalProcessed={4}, loopIterations={5}, workingSet={6}, presentAcceptedFps={7:F1}; {8}",
                                 _activeSettings?.Backend ?? "unknown",
                                 presentedFps,
                                 processedFps,
@@ -2095,6 +2292,7 @@ namespace Ryujinx.Uwp.CoreHost
                                 processedFrameCount,
                                 loopIterationCount,
                                 Environment.WorkingSet,
+                                acceptedPresentFps,
                                 nativePresentation));
 
                         intervalProcessedFrames = 0;
@@ -2110,6 +2308,9 @@ namespace Ryujinx.Uwp.CoreHost
                             CoreHostLog.Write("d3d12-descriptors",
                                 $"mode={(s.RingEnabled != 0 ? "ring" : "fixed")}; intervalMs={nowMilliseconds-descriptorSampleMilliseconds}; " +
                                 $"viewsDelta={s.ViewAllocations-previousDescriptorStats.ViewAllocations}; samplersDelta={s.SamplerAllocations-previousDescriptorStats.SamplerAllocations}; " +
+                                $"viewsPerDraw={Ratio(s.ViewAllocations-previousDescriptorStats.ViewAllocations, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
+                                $"samplersPerDraw={Ratio(s.SamplerAllocations-previousDescriptorStats.SamplerAllocations, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
+                                $"heapSwitchesPerDraw={Ratio(s.HeapSwitches-previousDescriptorStats.HeapSwitches, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
                                 $"occupied={s.ViewOccupied}/{s.SamplerOccupied}; peakOccupied={s.ViewPeakOccupied}/{s.SamplerPeakOccupied}; " +
                                 $"peakSubmission={s.ViewPeakPerSubmission}/{s.SamplerPeakPerSubmission}; pages={s.ViewPages}/{s.SamplerPages}; " +
                                 $"heapSwitchesDelta={s.HeapSwitches-previousDescriptorStats.HeapSwitches}; pressureDelta={s.PressureEvents-previousDescriptorStats.PressureEvents}; " +
@@ -2123,6 +2324,8 @@ namespace Ryujinx.Uwp.CoreHost
                                 $"psoHitDelta={p.PsoCacheHits-previousPerformanceStats.PsoCacheHits}; " +
                                 $"psoCreateDelta={p.PsoCreations-previousPerformanceStats.PsoCreations}; psoUsDelta={p.PsoMicroseconds-previousPerformanceStats.PsoMicroseconds}; " +
                                 $"descriptorUsDelta={p.DescriptorBindMicroseconds-previousPerformanceStats.DescriptorBindMicroseconds}; recordUsDelta={p.RecordMicroseconds-previousPerformanceStats.RecordMicroseconds}; " +
+                                $"descriptorTableHitDelta={p.DescriptorTableCacheHits-previousPerformanceStats.DescriptorTableCacheHits}; descriptorTableMissDelta={p.DescriptorTableCacheMisses-previousPerformanceStats.DescriptorTableCacheMisses}; " +
+                                $"descriptorCopiesDelta={p.DescriptorCopies-previousPerformanceStats.DescriptorCopies}; copiesPerDraw={Ratio(p.DescriptorCopies-previousPerformanceStats.DescriptorCopies, p.DrawCalls-previousPerformanceStats.DrawCalls)}; " +
                                 $"submitUsDelta={p.SubmitMicroseconds-previousPerformanceStats.SubmitMicroseconds}; presentUsDelta={p.PresentMicroseconds-previousPerformanceStats.PresentMicroseconds}; " +
                                 $"waitUsDelta={p.FenceWaitMicroseconds-previousPerformanceStats.FenceWaitMicroseconds}; depthDetachedDelta={p.DepthAttachmentsDetached-previousPerformanceStats.DepthAttachmentsDetached}; " +
                                 $"invalidPassDelta={p.InvalidRenderPasses-previousPerformanceStats.InvalidRenderPasses}; uavBarriersDelta={p.UavBarriers-previousPerformanceStats.UavBarriers}");
@@ -2143,6 +2346,9 @@ namespace Ryujinx.Uwp.CoreHost
                 Thread.Yield();
             }
         }
+
+        private static string Ratio(ulong numerator, ulong denominator) =>
+            denominator == 0 ? "0.000" : ((double)numerator / denominator).ToString("F3", System.Globalization.CultureInfo.InvariantCulture);
 
         private static int ToStickValue(float value)
         {
@@ -2969,11 +3175,17 @@ namespace Ryujinx.Uwp.CoreHost
                     minEnergy = customMinEnergy;
                 }
 
-                if (sampled == 0 || colored < minColored || energy < minEnergy || secondary < 2)
+                int minSecondary = 2;
+                if (int.TryParse(Environment.GetEnvironmentVariable("RYUJINX_UWP_CAPTURE_MIN_SECONDARY"), out int customMinSecondary) && customMinSecondary >= 0)
+                {
+                    minSecondary = customMinSecondary;
+                }
+
+                if (sampled == 0 || colored < minColored || energy < minEnergy || secondary < minSecondary)
                 {
                     if (currentAttempt == 1 || currentAttempt % 120 == 0)
                     {
-                        CoreHostLog.Write("d3d12-frame", $"Discarded D3D12 capture #{currentAttempt} as boot content; colored={colored}/{sampled} (min {minColored}), energy={energy} (min {minEnergy}), secondaryColorBin={secondary}.");
+                        CoreHostLog.Write("d3d12-frame", $"Discarded D3D12 capture #{currentAttempt} as boot content; colored={colored}/{sampled} (min {minColored}), energy={energy} (min {minEnergy}), secondaryColorBin={secondary} (min {minSecondary}).");
                     }
                     Volatile.Write(ref _d3d12FrameCaptureRequested, 0);
                     return;
@@ -3345,7 +3557,7 @@ namespace Ryujinx.Uwp.CoreHost
 
                     string destination = Path.Combine(localRoot, "boot-assets", programId.ToString("x16"));
                     Directory.CreateDirectory(destination);
-                    IFileSystem logoFs = programNca.OpenFileSystem(NcaSectionType.Logo, IntegrityCheckLevel.ErrorOnInvalid);
+                    using IFileSystem logoFs = programNca.OpenFileSystem(NcaSectionType.Logo, IntegrityCheckLevel.ErrorOnInvalid);
                     int assetMask = 0;
 
                     foreach (DirectoryEntryEx entry in logoFs.EnumerateEntries("/", "*", SearchOptions.Default))
@@ -3386,41 +3598,16 @@ namespace Ryujinx.Uwp.CoreHost
 
         private static bool TryCopyBootAsset(IFileSystem sourceFs, string sourcePath, string destinationPath)
         {
-            const int MaximumAssetBytes = 16 * 1024 * 1024;
-            string stagingPath = destinationPath + ".tmp";
             try
             {
                 using UniqueRef<IFile> source = new();
                 sourceFs.OpenFile(ref source.Ref, sourcePath.ToU8Span(), OpenMode.Read).ThrowIfFailure();
-                {
-                    using Stream input = source.Get.AsStream();
-                    using FileStream output = new(stagingPath, FileMode.Create, FileAccess.Write, FileShare.None);
-                    byte[] buffer = new byte[64 * 1024];
-                    int total = 0;
-                    int read;
-                    while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
-                    {
-                        total += read;
-                        if (total > MaximumAssetBytes)
-                        {
-                            throw new InvalidDataException("Boot asset exceeds the 16 MiB safety limit.");
-                        }
-                        output.Write(buffer, 0, read);
-                    }
-
-                    output.Flush(true);
-                }
-
-                // The staging stream must be disposed before Copy opens it.
-                // Keeping FileShare.None here caused every valid Logo asset to
-                // fail extraction with a self-inflicted sharing violation.
-                System.IO.File.Copy(stagingPath, destinationPath, true);
-                System.IO.File.Delete(stagingPath);
+                using Stream input = source.Get.AsStream();
+                BootAssetCache.Publish(input, destinationPath);
                 return true;
             }
             catch (Exception exception)
             {
-                try { System.IO.File.Delete(stagingPath); } catch { }
                 CoreHostLog.Error("copiando asset de boot " + sourcePath, exception);
                 return false;
             }
@@ -3654,6 +3841,15 @@ namespace Ryujinx.Uwp.CoreHost
 
         private static IntPtr LocalWindowProc(IntPtr window, uint message, IntPtr wParam, IntPtr lParam)
         {
+            // WM_APP + 41: tenths of an FPS, sampled on the GPU owner.
+            if (message == 0x8029)
+            {
+                string title = Environment.GetEnvironmentVariable("RYUJINX_UWP_LOCAL_WINDOW_TITLE") ?? "Ryubox";
+                string fps = (wParam.ToInt64() / 10.0).ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                Native_SetWindowText(window, $"{title} | {fps} FPS");
+                return IntPtr.Zero;
+            }
+
             // This route exists only for the visible desktop D3D12 harness.
             // The actual swap-chain HWND owns focus, so a hidden WinForms
             // helper cannot reliably receive keyboard messages from a tester.
@@ -3943,6 +4139,14 @@ namespace Ryujinx.Uwp.CoreHost
         [DllImport("user32.dll", EntryPoint = "UpdateWindow", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool Native_UpdateWindow(IntPtr window);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowTextW", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool Native_SetWindowText(IntPtr window, string text);
+
+        [DllImport("user32.dll", EntryPoint = "PostMessageW")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool Native_PostMessage(IntPtr window, uint message, IntPtr wParam, IntPtr lParam);
 
         [DllImport("user32.dll", EntryPoint = "UnregisterClassW", CharSet = CharSet.Unicode, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]

@@ -31,7 +31,27 @@ namespace ARMeilleure.Translation
         private long _invalidationGeneration;
         private readonly PinnedReclaimer<TranslatedFunction> _pinnedFunctions;
         private readonly Dictionary<ulong, TranslatedFunction> _executingFunctions = new();
+        // Guarded by _functionPublishLock, just like the authoritative tree.
+        // EnqueueForDeletion removes entries BEFORE executable memory can be freed.
+        private readonly Dictionary<ulong, TranslatedFunction> _pinnedLookupCache = new();
+        internal bool EnablePinnedLookupCache { get; set; } =
+            Environment.GetEnvironmentVariable("RYUJINX_UWP_PINNED_LOOKUP_CACHE") == "1";
         private Exception _dispatchFault;
+        private readonly GuestAccessProbe _guestAccessProbe = GuestAccessProbe.Parse(
+            Environment.GetEnvironmentVariable("RYUJINX_UWP_GUEST_ACCESS_PROBE"));
+
+        internal void TraceGuestAccess(ulong pc, ulong address, int size, bool write)
+        {
+            string observation = _guestAccessProbe?.Observe(pc, address, size, write, Memory);
+            if (observation != null) Ryujinx.Common.Logging.Logger.Info?.Print(Ryujinx.Common.Logging.LogClass.Cpu, observation);
+        }
+        private readonly GuestDispatchProbe _guestDispatchProbe = GuestDispatchProbe.Parse(
+            Environment.GetEnvironmentVariable("RYUJINX_UWP_GUEST_PROBE"));
+
+        internal void TraceGuestBlock(ulong address, ARMeilleure.State.ExecutionContext context, IMemoryManager memory)
+        {
+            _guestDispatchProbe?.TraceBlock(address, context, memory);
+        }
         internal static bool UsePinnedDispatch => AppContext.TryGetSwitch("Ryujinx.Uwp.PinnedJitDispatch", out bool enabled) && enabled;
 
         public readonly JitCache JitCache;
@@ -215,9 +235,9 @@ namespace ARMeilleure.Translation
             FunctionTable.Fill = (ulong)Stubs.SlowDispatchStub;
         }
 
-        public IPtcLoadState LoadDiskCache(string titleIdText, string displayVersion, bool enabled, string cacheSelector)
+        public IPtcLoadState LoadDiskCache(PtcCacheInfo cacheInfo, bool enabled)
         {
-            _ptc.Initialize(titleIdText, displayVersion, enabled, Memory.Type, cacheSelector);
+            _ptc.Initialize(cacheInfo, enabled && _guestAccessProbe == null, Memory.Type);
             return _ptc;
         }
 
@@ -411,6 +431,7 @@ namespace ARMeilleure.Translation
         internal TranslatedFunction AcquireFunction(ulong threadUid, ulong address, ExecutionMode mode, bool releasePrevious = false)
         {
             if (_dispatchFault != null) throw new InvalidOperationException("JIT session faulted.", _dispatchFault);
+            _guestDispatchProbe?.Trace(address, Memory);
             if (!UsePinnedDispatch) return GetOrTranslate(address, mode);
             Interlocked.Increment(ref _uwpDispatchLookups);
             Interlocked.Exchange(ref _uwpLastGuestAddress, unchecked((long)address));
@@ -431,12 +452,13 @@ namespace ARMeilleure.Translation
                     _pinnedFunctions.Unpin(previous);
                 }
                 if (_executingFunctions.ContainsKey(threadUid)) throw new InvalidOperationException("Nested pinned JIT dispatch.");
+                if (EnablePinnedLookupCache && _pinnedLookupCache.TryGetValue(address, out var hot)) return PinFunction(threadUid, hot);
                 if (Functions.TryGetValue(address, out var cached)) return PinFunction(threadUid, cached);
             }
 
-            // Serialize cold compilation, NOT cache hits or invalidation. Previously
-            // a thread decoding/compiling under the publication lock stopped every
-            // other guest thread, including those needing only already-mapped code.
+            // Serialize cold compilation, not cache hits or invalidation. The
+            // compiler uses thread-local arenas, but keeping one cold publisher
+            // here preserves the already validated pinned-dispatch ordering.
             long waitStarted = Stopwatch.GetTimestamp();
             lock (_translationLock)
             {
@@ -486,6 +508,11 @@ namespace ARMeilleure.Translation
             Volatile.Write(ref function.LastLookupTick, Environment.TickCount64);
             _pinnedFunctions.Pin(function);
             _executingFunctions.Add(threadUid, function);
+            if (EnablePinnedLookupCache)
+            {
+                if (_pinnedLookupCache.Count >= 512) _pinnedLookupCache.Clear();
+                _pinnedLookupCache[function.GuestAddress] = function;
+            }
             return function;
         }
 
@@ -532,6 +559,9 @@ namespace ARMeilleure.Translation
 
         internal TranslatedFunction GetOrTranslate(ulong address, ExecutionMode mode)
         {
+            // Epoch dispatch may hit its native function table without entering
+            // this path. The probe observes lookups, not every cached call.
+            _guestDispatchProbe?.Trace(address, Memory);
             Interlocked.Increment(ref _uwpDispatchLookups);
             Interlocked.Exchange(ref _uwpLastGuestAddress, unchecked((long)address));
 
@@ -623,6 +653,7 @@ namespace ARMeilleure.Translation
                 _ptc.State != PtcState.Disabled,
                 mode: Aarch32Mode.User,
                 isSingleStep: singleStep);
+            context.AccessProbe = _guestAccessProbe;
 
             Logger.StartPass(PassName.Decoding);
 
@@ -691,7 +722,7 @@ namespace ARMeilleure.Translation
             {
                 func = compiledFunc.MapWithPointer<GuestFunction>(JitCache, out funcPointer);
             }
-            catch (JitCacheFullException exception) when (UsePinnedDispatch && !pptcTranslation)
+            catch (JitCacheFullException exception) when (!pptcTranslation)
             {
                 // Retry the already compiled bytes, not the whole compiler.
                 // Active functions remain pinned; no live return address moves.
@@ -701,7 +732,16 @@ namespace ARMeilleure.Translation
                     $"JIT admission recovery: guestPc=0x{address:X16}, requestedBytes={compiledFunc.Code.Length}, " +
                     $"regions={before.Regions}, committedBytes={before.CommittedBytes}, freeBytes={before.FreeBytes}, " +
                     $"largestFreeBlock={before.LargestFreeBlock}, pressure={RuntimeMemoryBudget.Pressure}; cause={exception.Message}");
-                RetireColdTranslations(address, compiledFunc.Code.Length);
+                // Map has released its allocator lock. Request process cleanup
+                // here, then sample again: admission must see released memory,
+                // not the pre-trim high-water sample. This recovery also applies
+                // to the shipping native-dispatch profile.
+                RuntimeMemoryBudget.RequestTrim(Ryujinx.Common.Memory.MemoryPressure.Critical, admissionFailure: true);
+                RuntimeMemoryBudget.Refresh();
+                // Only pinned dispatch can synchronously reclaim cold code.
+                // Native-dispatch return stacks still require their epoch grace
+                // period; never force their retirement to satisfy this retry.
+                if (UsePinnedDispatch) RetireColdTranslations(address, compiledFunc.Code.Length);
                 try
                 {
                     func = compiledFunc.MapWithPointer<GuestFunction>(JitCache, out funcPointer);
@@ -716,7 +756,7 @@ namespace ARMeilleure.Translation
                         $"largestFreeBlock={after.LargestFreeBlock}, allocationFailures={after.AllocationFailures}, " +
                         $"pressure={RuntimeMemoryBudget.Pressure}; retryCause={retryException.Message}");
                     throw new JitCacheFullException(
-                        $"JIT compilation cancelled by memory budget at guest PC 0x{address:X16} after cold-code eviction.",
+                        $"JIT compilation cancelled by memory budget at guest PC 0x{address:X16} after admission recovery (pinnedDispatch={UsePinnedDispatch}).",
                         retryException);
                 }
             }
@@ -787,7 +827,7 @@ namespace ARMeilleure.Translation
             }
         }
 
-        private static ControlFlowGraph EmitAndGetCFG(
+        private ControlFlowGraph EmitAndGetCFG(
             ArmEmitterContext context,
             Block[] blocks,
             out Range range,
@@ -829,6 +869,11 @@ namespace ARMeilleure.Translation
                 context.CurrBlock = block;
 
                 context.MarkLabel(context.GetLabel(block.Address));
+
+                if (_guestDispatchProbe?.Contains(block.Address) == true)
+                {
+                    context.Call(typeof(NativeInterface).GetMethod(nameof(NativeInterface.TraceGuestBlock)), Const(block.Address));
+                }
 
                 if (UseUwpSafeJit())
                 {
@@ -1032,7 +1077,11 @@ namespace ARMeilleure.Translation
         {
             if (UsePinnedDispatch)
             {
-                lock (_functionPublishLock) _pinnedFunctions.Retire(func);
+                lock (_functionPublishLock)
+                {
+                    _pinnedLookupCache.Remove(func.GuestAddress);
+                    _pinnedFunctions.Retire(func);
+                }
             }
             else _retiredFunctions.Retire(func);
         }
@@ -1045,6 +1094,8 @@ namespace ARMeilleure.Translation
                 if (requiredBytes == 0 && !_reclaimPolicy.TrySchedule(now)) return;
                 var memory = JitCache.GetDetailedTelemetry();
                 if (requiredBytes == 0 && (!JitReclaimPolicy.NeedsReclaim(memory.ReservedBytes, memory.FreeBytes) ||
+                    JitReclaimPolicy.PreferGrowth(memory.Regions, JitCache.MaxRegions,
+                        RuntimeMemoryBudget.GetEffectiveUsageNoTrim(), RuntimeMemoryBudget.Limit) ||
                     // A reader sleeping in a supervisor call can retain this
                     // batch. Retiring more entries would only allow duplicate
                     // recompilation while none of the old code can be freed.
@@ -1097,6 +1148,7 @@ namespace ARMeilleure.Translation
 
         private void ClearJitCache()
         {
+            _pinnedLookupCache.Clear();
             // Ensure no attempt will be made to compile new functions due to rejit.
             ClearRejitQueue(allowRequeue: false);
 

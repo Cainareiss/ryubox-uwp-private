@@ -11,6 +11,7 @@ namespace Ryujinx.Common.Helper
         public static readonly Regex AmdGcn = AmdGcnRegex();
         public static readonly Regex AmdRdna3 = AmdRdna3Regex();
         public static readonly Regex NvidiaConsumerClass = NvidiaConsumerClassRegex();
+        public static readonly Regex IntelWindowsDriverVersion = IntelWindowsDriverVersionRegex();
 
         public static readonly Regex DomainLp1Ns = DomainLp1NsRegex();
         public static readonly Regex DomainLp1Lp1Npln = DomainLp1Lp1NplnRegex();
@@ -52,6 +53,9 @@ namespace Ryujinx.Common.Helper
 
         [GeneratedRegex("NVIDIA GeForce (R|G)?TX? (\\d{3}\\d?)M?")]
         internal static partial Regex NvidiaConsumerClassRegex();
+
+        [GeneratedRegex(@"^\d+\.\d+\.\d+\.\d+$")]
+        internal static partial Regex IntelWindowsDriverVersionRegex();
 
         #endregion
 

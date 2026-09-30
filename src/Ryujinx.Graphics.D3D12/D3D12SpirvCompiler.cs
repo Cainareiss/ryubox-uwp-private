@@ -140,11 +140,16 @@ public sealed unsafe class D3D12SpirvCompiler : IDisposable
                     hlsl = NormalizeInputStageInterface(hlsl);
                 }
 
+                if (shader.Stage == ShaderStage.Compute)
+                {
+                    hlsl = D3D12ComputeSharedNormalizer.Normalize(hlsl);
+                }
+
                 if (D3D12Pipeline.ProbeTargets)
                 {
                     try { File.WriteAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, $"last_{shader.Stage}.hlsl"), hlsl); } catch {}
                 }
-                return new(shader.Stage, hlsl, streamOutput);
+                return new(shader.Stage, hlsl, streamOutput, OriginalSpirv: (byte[])bytes.Clone());
             }
             finally { if (context != 0) _destroy(context); }
         }
@@ -292,12 +297,35 @@ public sealed unsafe class D3D12SpirvCompiler : IDisposable
 
     private static string NormalizeInputStageInterface(string source)
     {
-        return NormalizeTexCoordSignature(
+        string linked = NormalizeTexCoordSignature(
             source,
             "struct SPIRV_Cross_Input",
             "ryubox_link_input_dummy",
             out _,
             out _);
+
+        int inputStructStart = linked.IndexOf("struct SPIRV_Cross_Input", StringComparison.Ordinal);
+        if (inputStructStart >= 0)
+        {
+            int bodyStart = linked.IndexOf('{', inputStructStart);
+            int bodyEnd = bodyStart < 0 ? -1 : linked.IndexOf("};", bodyStart, StringComparison.Ordinal);
+            if (bodyStart >= 0 && bodyEnd > bodyStart)
+            {
+                string body = linked[(bodyStart + 1)..bodyEnd];
+                if (!body.Contains("SV_Position", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Add dummy SV_Position so that user interpolants (TEXCOORD0..15)
+                    // match the VS output registers (where SV_Position is always at register 0).
+                    linked = linked.Insert(bodyStart + 1, "\n    float4 ryubox_dummy_fragcoord : SV_Position;");
+                }
+            }
+        }
+
+        // FXC requires ordinary inputs before system values, followed by
+        // rasterizer-generated inputs. SV_Position is a system value, NOT a
+        // system-generated value like SV_IsFrontFace. Putting position last
+        // after front-face/primitive ID produces X4576.
+        return D3D12FragmentLoopNormalizer.Normalize(D3D12PixelInputNormalizer.Normalize(linked));
     }
 
     private static string NormalizeTexCoordSignature(
@@ -380,16 +408,6 @@ public sealed unsafe class D3D12SpirvCompiler : IDisposable
         string remainingBody = texCoordDeclaration.Replace(body, match =>
             int.TryParse(match.Groups["location"].Value, out int location) &&
             (uint)location < MaxTexCoordLocations ? string.Empty : match.Value).TrimStart('\r', '\n');
-        StringBuilder normalizedBody = new(body.Length + missing.Count * 48);
-        normalizedBody.AppendLine();
-        for (int location = 0; location < MaxTexCoordLocations; location++)
-        {
-            foreach (string decl in declarations[location])
-            {
-                normalizedBody.Append("    ").AppendLine(decl);
-            }
-        }
-
         string[] remainingLines = remainingBody.Split(["\r\n", "\n"], StringSplitOptions.None);
         List<string> otherLines = [];
         List<string> positionLines = [];
@@ -410,12 +428,22 @@ public sealed unsafe class D3D12SpirvCompiler : IDisposable
             }
         }
 
-        foreach (string line in otherLines)
+        StringBuilder normalizedBody = new(body.Length + missing.Count * 48);
+        normalizedBody.AppendLine();
+        foreach (string line in positionLines)
         {
             normalizedBody.Append("    ").AppendLine(line);
         }
 
-        foreach (string line in positionLines)
+        for (int location = 0; location < MaxTexCoordLocations; location++)
+        {
+            foreach (string decl in declarations[location])
+            {
+                normalizedBody.Append("    ").AppendLine(decl);
+            }
+        }
+
+        foreach (string line in otherLines)
         {
             normalizedBody.Append("    ").AppendLine(line);
         }

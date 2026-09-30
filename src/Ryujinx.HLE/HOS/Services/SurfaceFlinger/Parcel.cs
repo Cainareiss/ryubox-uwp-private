@@ -29,7 +29,18 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
         public Parcel(ReadOnlySpan<byte> data)
         {
+            if (data.Length < Unsafe.SizeOf<ParcelHeader>())
+            {
+                throw new ArgumentException("Binder parcel is shorter than its header.", nameof(data));
+            }
+
             _rawDataOwner = MemoryOwner<byte>.RentCopy(data);
+
+            if (!HasValidRanges())
+            {
+                _rawDataOwner.Dispose();
+                throw new ArgumentException("Binder parcel contains out-of-range payload or object offsets.", nameof(data));
+            }
 
             _payloadPosition = 0;
             _objectPosition = 0;
@@ -66,6 +77,11 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
                 return string.Empty;
             }
 
+            if (size > (int.MaxValue / 2) - 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(size), "Binder UTF-16 string length overflows the parcel size.");
+            }
+
             ReadOnlySpan<byte> data = ReadInPlace((size + 1) * 2);
 
             // Return the unicode string without the last character (null terminator)
@@ -100,11 +116,34 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
         public ReadOnlySpan<byte> ReadInPlace(int size)
         {
+            if (size < 0 || _payloadPosition < 0 || size > Payload.Length - _payloadPosition)
+            {
+                throw new ArgumentOutOfRangeException(nameof(size), "Binder parcel payload is truncated.");
+            }
+
             ReadOnlySpan<byte> result = Payload.Slice(_payloadPosition, size);
 
-            _payloadPosition += BitUtils.AlignUp(size, 4);
+            int alignedSize = BitUtils.AlignUp(size, 4);
+            if (alignedSize > Payload.Length - _payloadPosition)
+            {
+                throw new ArgumentOutOfRangeException(nameof(size), "Binder parcel payload is truncated before alignment.");
+            }
+
+            _payloadPosition += alignedSize;
 
             return result;
+        }
+
+        private bool HasValidRanges()
+        {
+            ref ParcelHeader header = ref Header;
+            ulong rawLength = (ulong)Raw.Length;
+            ulong headerSize = (uint)Unsafe.SizeOf<ParcelHeader>();
+
+            return header.PayloadOffset >= headerSize &&
+                header.ObjectOffset >= headerSize &&
+                (ulong)header.PayloadOffset + header.PayloadSize <= rawLength &&
+                (ulong)header.ObjectOffset + header.ObjectsSize <= rawLength;
         }
 
         [StructLayout(LayoutKind.Sequential, Size = 0x28)]

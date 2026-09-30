@@ -1323,6 +1323,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
         public Result MapPhysicalMemory(ulong address, ulong size)
         {
             ulong endAddr = address + size;
+            ulong physicalUsageBefore = PhysicalMemoryUsage;
 
             lock (_blockManager)
             {
@@ -1338,6 +1339,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
 
                 if (mappedSize == size)
                 {
+                    LogPhysicalMemoryMap(address, size, mappedSize, 0, physicalUsageBefore, KernelStatic.GetCurrentProcess(), Result.Success);
                     return Result.Success;
                 }
 
@@ -1350,11 +1352,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
                 if (currentProcess.ResourceLimit != null &&
                    !currentProcess.ResourceLimit.Reserve(LimitableResource.Memory, remainingSize))
                 {
-                    Logger.Warning?.Print(LogClass.KernelSvc,
-                        $"MapPhysicalMemory resource limit: address=0x{address:X}, size=0x{size:X}, " +
-                        $"mapped=0x{mappedSize:X}, requested=0x{remainingSize:X}, " +
-                        $"current={currentProcess.ResourceLimit.GetCurrentValue(LimitableResource.Memory)}, " +
-                        $"limit={currentProcess.ResourceLimit.GetLimitValue(LimitableResource.Memory)}");
+                    LogPhysicalMemoryMap(address, size, mappedSize, remainingSize, physicalUsageBefore, currentProcess, KernelResult.ResLimitExceeded);
                     return KernelResult.ResLimitExceeded;
                 }
 
@@ -1372,6 +1370,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
                 if (result != Result.Success)
                 {
                     CleanUpForError();
+                    LogPhysicalMemoryMap(address, size, mappedSize, remainingSize, physicalUsageBefore, currentProcess, result);
 
                     return result;
                 }
@@ -1379,6 +1378,7 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
                 if (!_slabManager.CanAllocate(MaxBlocksNeededForInsertion))
                 {
                     CleanUpForError();
+                    LogPhysicalMemoryMap(address, size, mappedSize, remainingSize, physicalUsageBefore, currentProcess, KernelResult.OutOfResource);
 
                     return KernelResult.OutOfResource;
                 }
@@ -1428,6 +1428,8 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
 
                 PhysicalMemoryUsage += remainingSize;
 
+                LogPhysicalMemoryMap(address, size, mappedSize, remainingSize, physicalUsageBefore, currentProcess, Result.Success);
+
                 ulong pagesCount = size / PageSize;
 
                 _blockManager.InsertBlock(
@@ -1442,6 +1444,44 @@ namespace Ryujinx.HLE.HOS.Kernel.Memory
             }
 
             return Result.Success;
+        }
+
+        private void LogPhysicalMemoryMap(
+            ulong address,
+            ulong requestedBytes,
+            ulong alreadyMappedBytes,
+            ulong newPhysicalPageBytes,
+            ulong physicalUsageBefore,
+            KProcess process,
+            Result result)
+        {
+            const ulong LargeMappingThreshold = 64UL * 1024 * 1024;
+
+            if (result == Result.Success && requestedBytes < LargeMappingThreshold)
+            {
+                return;
+            }
+
+            long resourceCurrent = process.ResourceLimit?.GetCurrentValue(LimitableResource.Memory) ?? -1;
+            long resourceLimit = process.ResourceLimit?.GetLimitValue(LimitableResource.Memory) ?? -1;
+            ulong newPages = newPhysicalPageBytes / PageSize;
+            string message =
+                $"MapPhysicalMemory {(result == Result.Success ? "accepted" : "rejected")}: " +
+                $"address=0x{address:X}, requestedVirtualBytes={requestedBytes}, " +
+                $"alreadyMappedBackingBytes={alreadyMappedBytes}, newPhysicalPageBytes={newPhysicalPageBytes}, " +
+                $"newPhysicalPages={newPages}, physicalUsageBefore={physicalUsageBefore}, " +
+                $"physicalUsageAfter={PhysicalMemoryUsage}, guestHostCommittedBytes={Context.GuestCommittedBytes}, " +
+                $"processUsageBytes={Ryujinx.Common.Memory.RuntimeMemoryBudget.GetEffectiveUsageNoTrim()}, " +
+                $"resourceCurrentBytes={resourceCurrent}, resourceLimitBytes={resourceLimit}, result={result}";
+
+            if (result == Result.Success)
+            {
+                Logger.Info?.Print(LogClass.KernelSvc, message);
+            }
+            else
+            {
+                Logger.Warning?.Print(LogClass.KernelSvc, message);
+            }
         }
 
         public Result UnmapPhysicalMemory(ulong address, ulong size)

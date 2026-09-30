@@ -36,6 +36,7 @@ namespace Ryujinx.Uwp.App
         private bool _pageLoaded;
         private bool _initializationStarted;
         private GamepadButtons _keyboardButtons;
+        private GamepadButtons _previousGameKeyboardButtons;
         private bool _pointerLeftDown;
         private bool _pointerRightDown;
         private float _pointerX = -float.MaxValue;
@@ -119,6 +120,7 @@ namespace Ryujinx.Uwp.App
             Window.Current.CoreWindow.PointerWheelChanged += CoreWindow_PointerWheelChanged;
             Window.Current.CoreWindow.KeyDown += CoreWindow_KeyDown;
             Window.Current.CoreWindow.KeyUp += CoreWindow_KeyUp;
+            Window.Current.CoreWindow.Activated += CoreWindow_Activated;
             
             string error;
             UwpGraphicsHost.GetPhysicalPanelSize(GameSurfacePanel,
@@ -298,7 +300,19 @@ namespace Ryujinx.Uwp.App
                     }
                     else
                     {
-                        _coreSession.SetInput(snapshot);
+                        UwpInputSnapshot gameSnapshot = new UwpInputSnapshot(
+                            snapshot.Buttons | _keyboardButtons,
+                            snapshot.PreviousButtons | _previousGameKeyboardButtons,
+                            snapshot.LeftThumbstickX,
+                            snapshot.LeftThumbstickY,
+                            snapshot.RightThumbstickX,
+                            snapshot.RightThumbstickY,
+                            snapshot.LeftTrigger,
+                            snapshot.RightTrigger,
+                            0,
+                            0);
+                        _previousGameKeyboardButtons = _keyboardButtons;
+                        _coreSession.SetInput(gameSnapshot);
                     }
                 }
                 return;
@@ -507,6 +521,15 @@ namespace Ryujinx.Uwp.App
             _keyboardButtons &= ~MapKeyboardButton(args.VirtualKey);
         }
 
+        private void CoreWindow_Activated(CoreWindow sender, WindowActivatedEventArgs args)
+        {
+            if (args.WindowActivationState == CoreWindowActivationState.Deactivated)
+            {
+                _keyboardButtons = GamepadButtons.None;
+                _previousGameKeyboardButtons = GamepadButtons.None;
+            }
+        }
+
         private static GamepadButtons MapKeyboardButton(VirtualKey key)
         {
             switch (key)
@@ -515,7 +538,7 @@ namespace Ryujinx.Uwp.App
                 case VirtualKey.Down: case VirtualKey.S: return GamepadButtons.DPadDown;
                 case VirtualKey.Left: case VirtualKey.A: return GamepadButtons.DPadLeft;
                 case VirtualKey.Right: case VirtualKey.D: return GamepadButtons.DPadRight;
-                case VirtualKey.Enter: case VirtualKey.Space: return GamepadButtons.A;
+                case VirtualKey.Enter: case VirtualKey.Space: case VirtualKey.Z: return GamepadButtons.A;
                 case VirtualKey.Escape: return GamepadButtons.B;
                 case VirtualKey.X: return GamepadButtons.X;
                 case VirtualKey.Y: return GamepadButtons.Y;
@@ -542,6 +565,7 @@ namespace Ryujinx.Uwp.App
             Window.Current.CoreWindow.PointerWheelChanged -= CoreWindow_PointerWheelChanged;
             Window.Current.CoreWindow.KeyDown -= CoreWindow_KeyDown;
             Window.Current.CoreWindow.KeyUp -= CoreWindow_KeyUp;
+            Window.Current.CoreWindow.Activated -= CoreWindow_Activated;
             _frontendCoordinator.BootPhaseChanged -= FrontendCoordinator_BootPhaseChanged;
             _frontendCoordinator.BootFailed -= FrontendCoordinator_BootFailed;
 

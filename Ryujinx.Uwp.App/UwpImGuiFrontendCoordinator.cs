@@ -366,20 +366,22 @@ namespace Ryujinx.Uwp.App
             _games.AddRange(files.OrderBy(file => file.DisplayName, StringComparer.CurrentCultureIgnoreCase));
             UwpFrontendLog.Write("library", string.Format("Catalogued {0} games from '{1}'", _games.Count, folder.Path));
             PublishCatalogue();
+            // Embedded art is the baseline. A custom folder is an override,
+            // not a replacement: users commonly have only a handful of
+            // custom covers for a large library.
+            await PublishEmbeddedCoversAsync();
             if (StorageApplicationPermissions.FutureAccessList.ContainsItem(CustomCoversToken))
             {
                 try
                 {
                     StorageFolder coversFolder = await StorageApplicationPermissions.FutureAccessList.GetFolderAsync(CustomCoversToken);
                     await LoadCustomCoversFromFolderAsync(coversFolder);
-                    return;
                 }
                 catch (Exception exception)
                 {
                     UwpFrontendLog.Error("carregando pasta salva de capas personalizadas", exception);
                 }
             }
-            await PublishEmbeddedCoversAsync();
         }
 
         private void PublishCatalogue()
@@ -391,17 +393,15 @@ namespace Ryujinx.Uwp.App
         private async Task PublishEmbeddedCoversAsync()
         {
             Dictionary<string, string> index = await LoadCoverIndexAsync();
+            int matchedCount = 0;
+            int missingCount = 0;
             for (int gameIndex = 0; gameIndex < _games.Count; gameIndex++)
             {
-                string normalized = NormalizeTitle(GameTitle(_games[gameIndex]));
-                string packageName;
-                if (!index.TryGetValue(normalized, out packageName))
-                {
-                    packageName = index.FirstOrDefault(pair =>
-                        pair.Key.Contains(normalized) || normalized.Contains(pair.Key)).Value;
-                }
+                string gameTitle = GameTitle(_games[gameIndex]);
+                string packageName = FindEmbeddedCover(index, gameTitle);
                 if (string.IsNullOrEmpty(packageName))
                 {
+                    missingCount++;
                     continue;
                 }
 
@@ -428,13 +428,60 @@ namespace Ryujinx.Uwp.App
                             ColorManagementMode.ColorManageToSRgb);
                         byte[] rgba = pixels.DetachPixelData();
                         UwpGraphicsHost.SetNativeImGuiCover(gameIndex, rgba, targetWidth, targetHeight, targetWidth * 4u);
+                        matchedCount++;
                     }
                 }
                 catch (Exception exception)
                 {
-                    UwpFrontendLog.Error("carregando capa embutida", exception);
+                    UwpFrontendLog.Error("carregando capa embutida para " + gameTitle, exception);
                 }
             }
+            UwpFrontendLog.Write("library", string.Format(
+                "Embedded covers: {0} matched, {1} without an indexed match, catalogue={2}, index={3}.",
+                matchedCount, missingCount, _games.Count, index.Count));
+        }
+
+        private static string FindEmbeddedCover(Dictionary<string, string> index, string title)
+        {
+            string normalized = NormalizeTitle(title);
+            string packageName;
+            if (index.TryGetValue(normalized, out packageName)) return packageName;
+
+            // Region/version tags in No-Intro names often differ from the
+            // filenames in a user's ROM folder.
+            string normalizedCore = NormalizeTitle(RemoveTrailingQualifier(title));
+            if (index.TryGetValue(normalizedCore, out packageName)) return packageName;
+
+            int bestScore = 0;
+            string bestPath = null;
+            foreach (KeyValuePair<string, string> pair in index)
+            {
+                string candidate = pair.Key;
+                if (candidate.Length < 6) continue;
+                if (candidate == normalized || candidate == normalizedCore) return pair.Value;
+
+                string shorter = candidate.Length <= normalizedCore.Length ? candidate : normalizedCore;
+                string longer = candidate.Length > normalizedCore.Length ? candidate : normalizedCore;
+                if (shorter.Length >= 6 && longer.IndexOf(shorter, StringComparison.Ordinal) >= 0)
+                {
+                    int score = shorter.Length * 2 - Math.Abs(candidate.Length - normalizedCore.Length);
+                    if (score > bestScore) { bestScore = score; bestPath = pair.Value; }
+                }
+            }
+
+            return bestPath;
+        }
+
+        private static string RemoveTrailingQualifier(string value)
+        {
+            string result = (value ?? string.Empty).Trim();
+            while (result.EndsWith(")", StringComparison.Ordinal))
+            {
+                int opening = result.LastIndexOf('(');
+                if (opening <= 0) break;
+                result = result.Substring(0, opening).TrimEnd();
+            }
+            return result;
         }
 
         private static async Task<Dictionary<string, string>> LoadCoverIndexAsync()
@@ -448,7 +495,7 @@ namespace Ryujinx.Uwp.App
                 {
                     if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#", StringComparison.Ordinal)) continue;
                     string[] parts = line.Split('\t');
-                    if (parts.Length >= 2) result[NormalizeTitle(parts[1])] = parts[0];
+                    if (parts.Length >= 2) result[NormalizeTitle(RemoveTrailingQualifier(parts[1]))] = parts[0];
                 }
             }
             catch (Exception exception)

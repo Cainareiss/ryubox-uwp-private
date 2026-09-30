@@ -22,5 +22,17 @@ namespace ARMeilleure.Translation.Cache
 
         internal static bool NeedsReclaim(ulong reservedBytes, long freeBytes) =>
             reservedBytes >= 256UL * 1024 * 1024 && freeBytes < LowFreeBytes;
+
+        // Do not evict the working set from the first region merely because
+        // its free list is small. If a complete next region fits the process
+        // budget, let normal lazy allocation grow instead of purge/recompile.
+        // This is a maintenance choice, not permission to commit memory:
+        // JitCache still checks every physical expansion independently.
+        internal static bool PreferGrowth(int regions, int maxRegions, long usage, long limit)
+        {
+            const long fullRegionAndHeadroom = (256L + 128) * 1024 * 1024;
+            return regions < maxRegions && usage > 0 && limit > fullRegionAndHeadroom &&
+                usage <= limit - fullRegionAndHeadroom;
+        }
     }
 }

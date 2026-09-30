@@ -814,7 +814,8 @@ namespace Ryujinx.Graphics.Gpu.Engine.Threed
                 viewports[0].Region.Width,
                 viewports[0].Region.Height,
                 _channel.TextureManager.RenderTargetScale,
-                disableTransform);
+                disableTransform,
+                _context.Capabilities.Api == Ryujinx.Graphics.Shader.Translation.TargetApi.Direct3D12);
 
             // Viewport size is only used on the shader when YNegate is enabled,
             // and if the fragment shader accesses gl_FragCoord,

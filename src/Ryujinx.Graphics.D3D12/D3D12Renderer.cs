@@ -4,6 +4,7 @@ using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Ryujinx.Common.Configuration;
+using Ryujinx.Common.Memory;
 using Ryujinx.Graphics.GAL;
 using Ryujinx.Graphics.Shader;
 using Ryujinx.Graphics.Shader.Translation;
@@ -32,6 +33,7 @@ public sealed unsafe class D3D12Renderer : IRenderer
     private readonly D3D12SpirvCompiler _compiler;
     private readonly object _programLock = new();
     private readonly Dictionary<BufferHandle, D3D12Buffer> _buffers = new();
+    private readonly object _bufferLock = new();
     private static long _nextBufferHandle;
     private readonly Dictionary<BufferHandle, int> _bufferSizes = new();
     private readonly D3D12SyncTracker _syncs = new();
@@ -50,6 +52,8 @@ public sealed unsafe class D3D12Renderer : IRenderer
     // harness opts into this compatibility path; normal and packaged backends
     // retain real guest counters.
     private static readonly bool DisableGuestCounters =
+        (AppContext.TryGetSwitch("Ryujinx.Uwp.D3D12DisableGuestCounters", out bool disableCounters) ? disableCounters : true) &&
+        !string.Equals(Environment.GetEnvironmentVariable("RYUJINX_UWP_D3D12_ENABLE_GUEST_COUNTERS"), "1", StringComparison.Ordinal) ||
         string.Equals(Environment.GetEnvironmentVariable("RYUJINX_UWP_D3D12_DISABLE_GUEST_COUNTERS"), "1", StringComparison.Ordinal);
     private bool _commands;
     private volatile bool _disposed;
@@ -234,7 +238,11 @@ public sealed unsafe class D3D12Renderer : IRenderer
         int thread = Environment.CurrentManagedThreadId;
         if (_gpuThreadId == 0) _gpuThreadId = thread;
         if (_gpuThreadId != thread) throw new InvalidOperationException("D3D12 command recording must run on the GPU owner thread.");
-        if (!_commands) { Device.StartCommands(); _commands = true; }
+        // Native readback/presentation helpers can submit their own command
+        // list. Reconcile with native recording state even when the managed
+        // flag still says open; the native BeginCommands export is idempotent.
+        Device.StartCommands();
+        _commands = true;
     }
 
     // Call on the GPU owner, before that thread exits. The caller must join
@@ -261,7 +269,10 @@ public sealed unsafe class D3D12Renderer : IRenderer
         foreach (var binding in program.Bindings)
             if (binding.Type == 3) samplers = checked(samplers + binding.Count); else views = checked(views + binding.Count);
         if (views > ViewCapacity || samplers > SamplerCapacity) throw new NotSupportedException("Shader descriptor footprint exceeds validated native per-draw limits.");
-        if (!_descriptorRingEnabled && (_viewDescriptors + views > ViewCapacity || _samplerDescriptors + samplers > SamplerCapacity) ||
+        // Descriptor-table reuse must not turn an arbitrarily long guest
+        // workload into a single command list (and eventually a GPU timeout).
+        if (_drawCount >= ViewCapacity ||
+            !_descriptorRingEnabled && (_viewDescriptors + views > ViewCapacity || _samplerDescriptors + samplers > SamplerCapacity) ||
             target && _targetDescriptors == ViewCapacity || depth && _depthDescriptors == ViewCapacity)
             Flush();
         EnsureCommands();
@@ -319,7 +330,8 @@ public sealed unsafe class D3D12Renderer : IRenderer
         // Native IDs are device-local and can collide across renderers. GAL
         // handles must never accidentally address a buffer from another device.
         var handle = Unsafe.As<long, BufferHandle>(ref serial);
-        _buffers.Add(handle, buffer); _bufferSizes.Add(handle, size); return handle;
+        lock (_bufferLock) { _buffers.Add(handle, buffer); _bufferSizes.Add(handle, size); }
+        return handle;
     }
     public BufferHandle CreateBuffer(nint pointer, int size) => throw new NotSupportedException("D3D12 host-import buffers are not implemented; PrepareHostMapping returns false.");
     public BufferHandle CreateBufferSparse(ReadOnlySpan<BufferRange> ranges) => throw new NotSupportedException("Sparse buffers are not advertised by D3D12.");
@@ -327,38 +339,77 @@ public sealed unsafe class D3D12Renderer : IRenderer
     internal D3D12Buffer Buffer(BufferHandle handle)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        return _buffers.TryGetValue(handle, out var value) ? value : throw new ArgumentException("Unknown D3D12 buffer.");
+        lock (_bufferLock)
+            return _buffers.TryGetValue(handle, out var value) ? value : throw new ArgumentException("Unknown D3D12 buffer.");
     }
     internal D3D12Buffer Buffer(BufferHandle handle, int offset, int size)
     {
-        var buffer = Buffer(handle);
-        int length = _bufferSizes[handle];
-        if (offset < 0 || size < 0 || offset > length || size > length - offset)
-            throw new ArgumentOutOfRangeException(nameof(size), "GAL buffer range exceeds its logical allocation.");
-        return buffer;
+        lock (_bufferLock)
+        {
+            var buffer = Buffer(handle);
+            int length = _bufferSizes[handle];
+            if (offset < 0 || size < 0 || offset > length || size > length - offset)
+                throw new ArgumentOutOfRangeException(nameof(size), "GAL buffer range exceeds its logical allocation.");
+            return buffer;
+        }
     }
-    internal D3D12GalTexture Texture(ITexture texture)
+    internal D3D12GalTexture Texture(ITexture texture, bool bound = false)
     {
         if (texture is not D3D12GalTexture result) throw new ArgumentException("Not a D3D12 texture.");
-        result.CheckOwner(this); return result;
+        result.CheckOwner(this, bound); return result;
     }
     public void DeleteBuffer(BufferHandle handle)
     {
-        if (!_buffers.Remove(handle, out var buffer)) throw new ArgumentException("Unknown buffer.");
-        _bufferSizes.Remove(handle);
-        buffer.Dispose();
+        lock (_bufferLock)
+        {
+            if (!_buffers.Remove(handle, out var buffer)) throw new ArgumentException("Unknown buffer.");
+            _bufferSizes.Remove(handle);
+            buffer.Dispose();
+        }
     }
     public void SetBufferData(BufferHandle handle, int offset, ReadOnlySpan<byte> data)
     {
         var buffer = Buffer(handle, offset, data.Length);
         if (data.IsEmpty) return; // Empty range has no bytes to modify.
-        EnsureCommands(); Device.Upload(buffer, (ulong)offset, data);
+        UploadBuffer(buffer, (ulong)offset, data);
+    }
+    internal void UploadBuffer(D3D12Buffer buffer, ulong offset, ReadOnlySpan<byte> data)
+    {
+        const int ChunkBytes = 4 * 1024 * 1024;
+        for (int copied = 0; copied < data.Length;)
+        {
+            int length = Math.Min(ChunkBytes, data.Length - copied);
+            // Guest memory can fault and invoke GPU synchronization while being
+            // read. Snapshot it before entering native code/its context mutex.
+            using var snapshot = MemoryOwner<byte>.RentCopy(data.Slice(copied, length));
+            EnsureCommands();
+            try { Device.Upload(buffer, offset + (ulong)copied, snapshot.Span); }
+            catch (COMException error) when (error.HResult == unchecked((int)0x80070718))
+            {
+                ulong fence = Flush();
+                Device.Wait(fence);
+                EnsureCommands();
+                // One bounded retry, only for pre-copy upload-pool pressure.
+                Device.Upload(buffer, offset + (ulong)copied, snapshot.Span);
+            }
+            copied += length;
+        }
     }
     public PinnedSpan<byte> GetBufferData(BufferHandle handle, int offset, int size)
     {
-        var buffer = Buffer(handle, offset, size);
-        Flush(); byte[] result = new byte[size]; if (size != 0) Device.ReadBuffer(buffer, (ulong)offset, result);
-        return Pin(result);
+        lock (_bufferLock)
+        {
+            var buffer = Buffer(handle, offset, size);
+            bool background = _gpuThreadId != 0 && _gpuThreadId != Environment.CurrentManagedThreadId;
+            if (!background) Flush();
+            byte[] result = new byte[size];
+            if (size != 0)
+            {
+                if (background) Device.ReadSubmittedBuffer(buffer, (ulong)offset, result);
+                else Device.ReadBuffer(buffer, (ulong)offset, result);
+            }
+            return Pin(result);
+        }
     }
     internal static PinnedSpan<byte> Pin(byte[] bytes)
     {
@@ -475,6 +526,11 @@ public sealed unsafe class D3D12Renderer : IRenderer
         UpdateCounters();
         lock (_programLock) _programs.RemoveAll(p => p.Id == 0);
         var info = Device.GetInfo();
+        // Diagnostic categories deliberately overlap native/texture totals;
+        // never sum them to determine process admission. UploadBytes counts
+        // staging resources still retained by outstanding GPU submissions.
+        RuntimeMemoryBudget.Observe(MemoryCategory.D3D12Resources, checked((long)info.LiveResourceBytes));
+        RuntimeMemoryBudget.Observe(MemoryCategory.D3D12Uploads, checked((long)info.UploadBytes));
         if (info.DeviceRemovedReason < 0 || info.DebugErrors != 0)
         {
             string diagnostic = Device.GetDiagnosticMessage();
@@ -494,29 +550,9 @@ public sealed unsafe class D3D12Renderer : IRenderer
             Flush();
         }
         var info = Device.GetInfo(); byte[] data = Device.CaptureRgba8();
-        bool hasColor = false;
-        for (int i = 0; i < data.Length; i += 64)
-        {
-            if ((data[i] | data[i + 1] | data[i + 2]) != 0) { hasColor = true; break; }
-        }
-        if (!hasColor && LastPresentedTexture != null)
-        {
-            try
-            {
-                using var pData = LastPresentedTexture.GetData(0, 0);
-                var span = pData.Get();
-                for (int i = 0; i < span.Length; i += 64)
-                {
-                    if ((span[i] | span[i + 1] | span[i + 2]) != 0)
-                    {
-                        data = span.ToArray();
-                        ScreenCaptured?.Invoke(this, new((int)LastPresentedTexture.Width, (int)LastPresentedTexture.Height, false, data, false, false));
-                        return;
-                    }
-                }
-            }
-            catch {}
-        }
+        // Capture the displayed buffer, including a legitimately black frame.
+        // Replacing it with the raw guest texture hides presentation failures
+        // and bypasses crop, orientation, aspect ratio and format conversion.
         ScreenCaptured?.Invoke(this, new((int)info.Width, (int)info.Height, false, data, false, false));
     }
     private static int CounterIndex(CounterType type) => type switch
@@ -552,7 +588,7 @@ public sealed unsafe class D3D12Renderer : IRenderer
     internal void Blit(D3D12GalTexture source, D3D12GalTexture target, Extents2DF src, Extents2DF dst, bool linear,
         D3D12SamplerDescriptor? sampling = null)
     {
-        source.CheckOwner(this); target?.CheckOwner(this); StopCounters(); EnsureCommands();
+        source.CheckOwner(this); target?.CheckOwner(this, bound: true); StopCounters(); EnsureCommands();
         if (dst.X1 == dst.X2 || dst.Y1 == dst.Y2) return;
 
         bool isDepth = target?.Native.Format.IsDepth == true;
@@ -676,7 +712,7 @@ public sealed unsafe class D3D12Renderer : IRenderer
     internal void ClearColorChannels(D3D12GalTexture target, uint mask, ColorF color)
     {
         if ((mask & ~15u) != 0) throw new ArgumentOutOfRangeException(nameof(mask));
-        target?.CheckOwner(this);
+        target?.CheckOwner(this, bound: true);
         if (mask == 0) return; // No selected color channels: identity.
         StopCounters();
         if (mask == 15)
@@ -772,7 +808,7 @@ public sealed unsafe class D3D12Renderer : IRenderer
         _events.Clear();
         lock (_textureLock)
         {
-            foreach (var texture in _textures.ToArray()) Release(texture.Release);
+            foreach (var texture in _textures.ToArray()) Release(texture.ForceRelease);
             _textures.Clear();
         }
         foreach (var buffer in _buffers.Values) Release(buffer.Dispose);

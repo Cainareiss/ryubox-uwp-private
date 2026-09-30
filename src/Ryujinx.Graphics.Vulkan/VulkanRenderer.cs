@@ -106,6 +106,7 @@ namespace Ryujinx.Graphics.Vulkan
         public string GpuDriver { get; private set; }
         public string GpuRenderer { get; private set; }
         public string GpuVersion { get; private set; }
+        public string GpuDriverVersion { get; private set; }
 
         public bool PreferThreading => true;
 
@@ -184,6 +185,14 @@ namespace Ryujinx.Graphics.Vulkan
             {
                 SType = StructureType.PhysicalDeviceProperties2,
             };
+
+            PhysicalDeviceIDProperties propertiesId = new()
+            {
+                SType = StructureType.PhysicalDeviceIDProperties,
+                PNext = properties2.PNext,
+            };
+
+            properties2.PNext = &propertiesId;
 
             PhysicalDeviceSubgroupProperties propertiesSubgroup = new()
             {
@@ -379,13 +388,17 @@ namespace Ryujinx.Graphics.Vulkan
             GpuVendor = VendorUtils.GetNameFromId(properties.VendorID);
             GpuDriver = hasDriverProperties && !OperatingSystem.IsMacOS() ?
                 VendorUtils.GetFriendlyDriverName(driverProperties.DriverID) : GpuVendor; // Fallback to vendor name if driver is unavailable or on MacOS where vendor is preferred.
+            GpuDriverVersion = TryGetIntelWindowsDriverVersionFromUuid(ref propertiesId, out string intelDriverVersion) ? intelDriverVersion :
+                hasDriverProperties ?
+                GetDriverInfo(ref driverProperties) ?? ParseDriverVersion(ref properties) :
+                ParseDriverVersion(ref properties);
 
             fixed (byte* deviceName = properties.DeviceName)
             {
                 GpuRenderer = Marshal.PtrToStringAnsi((nint)deviceName);
             }
 
-            GpuVersion = $"Vulkan v{ParseStandardVulkanVersion(properties.ApiVersion)}, Driver v{ParseDriverVersion(ref properties)}";
+            GpuVersion = $"Vulkan v{ParseStandardVulkanVersion(properties.ApiVersion)}";
 
             IsAmdGcn = !IsMoltenVk && Vendor == Vendor.Amd && Patterns.AmdGcn.IsMatch(GpuRenderer);
 
@@ -861,7 +874,7 @@ namespace Ryujinx.Graphics.Vulkan
 
         public HardwareInfo GetHardwareInfo()
         {
-            return new HardwareInfo(GpuVendor, GpuRenderer, GpuDriver);
+            return new HardwareInfo(GpuVendor, GpuRenderer, GpuDriver, GpuDriverVersion);
         }
 
         /// <summary>
@@ -911,7 +924,53 @@ namespace Ryujinx.Graphics.Vulkan
                 return $"{(driverVersionRaw >> 22) & 0x3FF}.{(driverVersionRaw >> 14) & 0xFF}.{(driverVersionRaw >> 6) & 0xFF}.{driverVersionRaw & 0x3F}";
             }
 
+            // Intel's Windows Vulkan driver exposes the 101.xxxx build portion in a custom layout.
+            if (properties.VendorID == 0x8086 && OperatingSystem.IsWindows())
+            {
+                return $"{driverVersionRaw >> 14}.{driverVersionRaw & 0x3FFF}";
+            }
+
             return ParseStandardVulkanVersion(driverVersionRaw);
+        }
+
+        private static unsafe string GetDriverInfo(ref PhysicalDeviceDriverPropertiesKHR driverProperties)
+        {
+            fixed (byte* driverInfo = driverProperties.DriverInfo)
+            {
+                string driverInfoString = Marshal.PtrToStringAnsi((nint)driverInfo);
+
+                return string.IsNullOrWhiteSpace(driverInfoString) ? null : driverInfoString;
+            }
+        }
+
+        private static unsafe bool TryGetIntelWindowsDriverVersionFromUuid(ref PhysicalDeviceIDProperties propertiesId, out string driverVersion)
+        {
+            driverVersion = null;
+
+            if (!OperatingSystem.IsWindows())
+            {
+                return false;
+            }
+
+            fixed (byte* driverUuid = propertiesId.DriverUuid)
+            {
+                string driverUuidString = Marshal.PtrToStringAnsi((nint)driverUuid, (int)Vk.UuidSize);
+                int terminatorIndex = driverUuidString.IndexOf('\0');
+
+                if (terminatorIndex >= 0)
+                {
+                    driverUuidString = driverUuidString[..terminatorIndex];
+                }
+
+                if (Patterns.IntelWindowsDriverVersion.IsMatch(driverUuidString))
+                {
+                    driverVersion = driverUuidString;
+
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         internal PrimitiveTopology TopologyRemap(PrimitiveTopology topology)
@@ -939,7 +998,7 @@ namespace Ryujinx.Graphics.Vulkan
 
         private void PrintGpuInformation()
         {
-            string gpuInfoMessage = $"{GpuRenderer} ({GpuVersion})";
+            string gpuInfoMessage = $"{GpuRenderer} ({GpuVersion}, Driver: {GpuDriver} {GpuDriverVersion})";
             if (!GpuRenderer.StartsWithIgnoreCase(GpuVendor))
                 gpuInfoMessage = gpuInfoMessage.Prepend(GpuVendor);
 

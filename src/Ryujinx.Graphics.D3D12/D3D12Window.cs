@@ -1,4 +1,6 @@
 using System;
+using System.Buffers.Binary;
+using System.IO;
 using Ryujinx.Common.Configuration;
 using Ryujinx.Common.Logging;
 using Ryujinx.Graphics.GAL;
@@ -15,6 +17,11 @@ public sealed class D3D12Window : IWindow
     private int _presentCounter;
     private static readonly bool TracePresentation =
         Environment.GetEnvironmentVariable("RYUBOX_D3D12_TRACE_PRESENTATION") == "1";
+    private static readonly bool TraceViewport =
+        Environment.GetEnvironmentVariable("RYUBOX_D3D12_TRACE_VIEWPORT") == "1";
+    private static readonly int SourceCaptureInterval =
+        int.TryParse(Environment.GetEnvironmentVariable("RYUBOX_D3D12_CAPTURE_SOURCE_INTERVAL"), out int interval) && interval > 0
+            ? interval : 0;
     internal D3D12Window(D3D12Renderer renderer, uint width, uint height) { _renderer = renderer; _width = (int)width; _height = (int)height; }
     public void Present(ITexture texture, ImageCrop crop, Action callback)
     {
@@ -28,7 +35,7 @@ public sealed class D3D12Window : IWindow
         if (TracePresentation) try
         {
             string line = $"[Present] image={image.Width}x{image.Height} fmt={image.Info.Format} id={image.Native?.Id} crop=({crop.Left},{crop.Top},{crop.Right},{crop.Bottom})\n";
-            System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\draw_targets.txt", line);
+            System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "draw_targets.txt"), line);
         }
         catch {}
         _renderer.Device.Clear(null, 0, 0, 0, 1);
@@ -74,25 +81,40 @@ public sealed class D3D12Window : IWindow
         if (TracePresentation) Logger.Warning?.Print(Ryujinx.Common.Logging.LogClass.Gpu,
             $"[D3D12 Present DEBUG] image={image.Width}x{image.Height}, crop=({crop.Left},{crop.Top},{crop.Right},{crop.Bottom}), clamped=({left},{top},{right},{bottom}), flipY={crop.FlipY}, win={_width}x{_height}");
         if (TracePresentation)
-            try { System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\present_debug.txt", $"image={image.Width}x{image.Height}, crop=({crop.Left},{crop.Top},{crop.Right},{crop.Bottom}), clamped=({left},{top},{right},{bottom}), flipY={crop.FlipY}, win={_width}x{_height}\n"); } catch {}
+            try { System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "present_debug.txt"), $"image={image.Width}x{image.Height}, crop=({crop.Left},{crop.Top},{crop.Right},{crop.Bottom}), clamped=({left},{top},{right},{bottom}), flipY={crop.FlipY}, win={_width}x{_height}\n"); } catch {}
 
         float aspect = crop.AspectRatioX > 0 && crop.AspectRatioY > 0 ? crop.AspectRatioX / crop.AspectRatioY : (right - left) / (float)(bottom - top);
         float w = _width, h = _height;
         if (!crop.IsStretched) { if (w / h > aspect) w = h * aspect; else h = w / aspect; }
         float x = (_width - w) / 2, y = (_height - h) / 2;
-        // GAL presentation coordinates use a bottom-left guest origin while
-        // the D3D12 presentation target is top-left. The baseline conversion
-        // is therefore a vertical inversion; the guest FlipY flag cancels it.
-        // Passing crop.FlipY through directly inverted the normal path and
-        // was visible in Rivals of Aether (and in the asymmetric presentation
-        // regression) even when the 3D render target itself was correct.
-        bool flipY = !crop.FlipY;
+        // D3D12 texture coordinates and the backbuffer both use a top-left
+        // origin. Preserve the GAL FlipY request directly; complementing it
+        // here inverted every normal (FlipY=false) game frame.
+        bool flipY = crop.FlipY;
         var source = new Extents2DF(crop.FlipX ? right : left, flipY ? bottom : top,
             crop.FlipX ? left : right, flipY ? top : bottom);
         _renderer.Blit(image, null, source, new(x, y, x + w, y + h), _linear);
         _renderer.Present(_vsync); callback?.Invoke();
 
         int pIndex = System.Threading.Interlocked.Increment(ref _presentCounter);
+        if (SourceCaptureInterval != 0 && (pIndex == 1 || pIndex % SourceCaptureInterval == 0))
+        {
+            try { CaptureSource(image, pIndex); }
+            catch (Exception ex)
+            {
+                Logger.Warning?.Print(LogClass.Gpu, $"[D3D12] Source capture {pIndex} failed: {ex.Message}");
+            }
+        }
+        if (TraceViewport && (pIndex == 1 || pIndex % 20 == 0))
+        {
+            var pipeline = (D3D12Pipeline)_renderer.Pipeline;
+            try
+            {
+                string line = $"present={pIndex}; image={image.Width}x{image.Height}; crop={left},{top}-{right},{bottom}; cropFlipY={crop.FlipY}; guestViewportHeight={pipeline.LastGuestViewportSignedHeight}; guestDepth={pipeline.LastGuestViewportDepthNear},{pipeline.LastGuestViewportDepthFar}; negativeViewports={pipeline.NegativeViewportCalls}; positiveViewports={pipeline.PositiveViewportCalls}; mismatchedAttachments={pipeline.TargetDimensionMismatchCount}; proxyDraws={pipeline.AttachmentProxyDraws}\n";
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "viewport_sample.log"), line);
+            }
+            catch { }
+        }
         if (TracePresentation && (pIndex == 1 || pIndex == 60 || pIndex == 120 || pIndex % 300 == 0))
         {
             try
@@ -110,14 +132,61 @@ public sealed class D3D12Window : IWindow
                     }
                 }
                 string logLine = $"[Present #{pIndex}] fmt={image.Info.Format}, w={image.Width}, h={image.Height}, colored={imgColored}/{span.Length / 64}, energy={imgEnergy}\n";
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\present_image_check.txt", logLine);
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "present_image_check.txt"), logLine);
             }
             catch (Exception ex)
             {
-                System.IO.File.AppendAllText(@"C:\Users\Cainã\AppData\Local\Packages\Ryujinx.Xbox.UWP_z7hww2mmeny5j\LocalState\Logs\present_image_check.txt",
+                System.IO.File.AppendAllText(System.IO.Path.Combine(D3D12Pipeline.LogDir, "present_image_check.txt"),
                     $"[Present #{pIndex}] Exception reading image: {ex.Message}\n");
             }
         }
+    }
+
+    private static void CaptureSource(D3D12GalTexture image, int present)
+    {
+        bool rgba = image.Info.Format is Format.R8G8B8A8Unorm or Format.R8G8B8A8Srgb;
+        bool bgra = image.Info.Format is Format.B8G8R8A8Unorm or Format.B8G8R8A8Srgb;
+        if (!rgba && !bgra) return;
+
+        int width = image.Width;
+        int height = image.Height;
+        int rowBytes = checked(width * 4);
+        int pitch = image.Info.GetMipStride(0);
+        int pixelBytes = checked(rowBytes * height);
+        byte[] bmp = new byte[checked(54 + pixelBytes)];
+        var header = bmp.AsSpan();
+        header[0] = (byte)'B'; header[1] = (byte)'M';
+        BinaryPrimitives.WriteInt32LittleEndian(header[2..], bmp.Length);
+        BinaryPrimitives.WriteInt32LittleEndian(header[10..], 54);
+        BinaryPrimitives.WriteInt32LittleEndian(header[14..], 40);
+        BinaryPrimitives.WriteInt32LittleEndian(header[18..], width);
+        BinaryPrimitives.WriteInt32LittleEndian(header[22..], -height); // Top-down: row zero stays at the top.
+        BinaryPrimitives.WriteInt16LittleEndian(header[26..], 1);
+        BinaryPrimitives.WriteInt16LittleEndian(header[28..], 32);
+        BinaryPrimitives.WriteInt32LittleEndian(header[34..], pixelBytes);
+
+        using var data = image.GetData(0, 0);
+        var source = data.Get();
+        if (pitch < rowBytes || source.Length < checked(pitch * height))
+            throw new InvalidDataException($"Readback too small: {source.Length}, pitch={pitch}, size={width}x{height}");
+        for (int y = 0; y < height; y++)
+        {
+            var sourceRow = source.Slice(y * pitch, rowBytes);
+            var targetRow = bmp.AsSpan(54 + y * rowBytes, rowBytes);
+            sourceRow.CopyTo(targetRow);
+            if (rgba)
+            {
+                for (int x = 0; x < rowBytes; x += 4)
+                    (targetRow[x], targetRow[x + 2]) = (targetRow[x + 2], targetRow[x]);
+            }
+        }
+
+        string directory = Environment.GetEnvironmentVariable("RYUBOX_D3D12_CAPTURE_SOURCE_DIR");
+        if (string.IsNullOrWhiteSpace(directory)) directory = D3D12Pipeline.LogDir;
+        Directory.CreateDirectory(directory);
+        string path = Path.Combine(directory, $"source-present-{present:D6}.bmp");
+        File.WriteAllBytes(path, bmp);
+        Logger.Warning?.Print(LogClass.Gpu, $"[D3D12] Captured raw source texture: {path}, {width}x{height}, {image.Info.Format}");
     }
     public void SetSize(int width, int height)
     {

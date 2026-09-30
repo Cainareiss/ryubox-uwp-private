@@ -448,7 +448,7 @@ namespace Ryujinx.HLE.HOS.Services.SurfaceFlinger
 
                 if (acquireStatus == Status.Success)
                 {
-                    if (Interlocked.Increment(ref _diagnosticAcquireLogs) <= 4)
+                    if (Interlocked.Increment(ref _diagnosticAcquireLogs) <= 32)
                     {
                         Logger.Info?.Print(LogClass.SurfaceFlinger, $"Compose acquired buffer: layer={RenderLayerId}, slot={item.Slot}, size={item.GraphicBuffer.Object.Width}x{item.GraphicBuffer.Object.Height}");
                     }

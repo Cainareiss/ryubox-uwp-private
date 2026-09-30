@@ -49,11 +49,14 @@ D3D12_CPU_DESCRIPTOR_HANDLE DepthView(const std::shared_ptr<Resource>& resource,
 
 D3D12_CPU_DESCRIPTOR_HANDLE TargetView(UINT64 id)
 {
-    Require(recording);
+    Require(recording, HRESULT_FROM_WIN32(ERROR_INVALID_STATE), "TargetView requires an open command list.");
     TextureView view{};
     auto resource = id ? GetTextureView(id).resource : targets[targetIndex];
     if (id) view = GetTextureView(id);
-    Require((resource->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0);
+    Require((resource->desc.Flags & D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET) != 0, E_INVALIDARG,
+        "TargetView is not renderable: id=" + std::to_string(id) +
+        "; format=" + std::to_string(resource->desc.Format) +
+        "; flags=" + std::to_string(resource->desc.Flags));
     Transition(resource, D3D12_RESOURCE_STATE_RENDER_TARGET);
     auto handle = rtvHeap->GetCPUDescriptorHandleForHeapStart();
     if (id)
@@ -213,9 +216,11 @@ void CopyTexture(UINT64 from, UINT64 to, UINT srcMip, UINT dstMip, UINT sx, UINT
 
 UINT64 BeginCounter(UINT type)
 {
-    Require(recording && type<=2 && counters.size()<1024);
+    Require(recording, HRESULT_FROM_WIN32(ERROR_INVALID_STATE), "BeginCounter requires an open command list.");
+    Require(type <= 2, E_INVALIDARG, "BeginCounter invalid query type.");
+    Require(counters.size() < 65536, E_OUTOFMEMORY, "BeginCounter exceeds maximum active query count.");
     // One active query of each kind. Native scopes must end before submission.
-    for(const auto& [id,c] : counters) Require(c.fence || c.type!=type);
+    for(const auto& [id,c] : counters) Require(c.fence || c.type!=type, HRESULT_FROM_WIN32(ERROR_INVALID_STATE), "BeginCounter cannot start query while another of the same type is active.");
     Counter counter{}; counter.type=type;
     D3D12_QUERY_HEAP_DESC desc{type==0 ? D3D12_QUERY_HEAP_TYPE_OCCLUSION : type==1 ? D3D12_QUERY_HEAP_TYPE_PIPELINE_STATISTICS : D3D12_QUERY_HEAP_TYPE_SO_STATISTICS,type==2 ? 4u : 1u,0};
     Check(device->CreateQueryHeap(&desc,IID_PPV_ARGS(&counter.heap)));

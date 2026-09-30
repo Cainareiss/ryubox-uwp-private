@@ -35,13 +35,10 @@ namespace ARMeilleure.Translation.PTC
         private const string OuterHeaderMagicString = "PTCohd\0\0";
         private const string InnerHeaderMagicString = "PTCihd\0\0";
 
-        private const uint InternalVersion = 7024; //! To be incremented manually for each change to the ARMeilleure project.
+        private const uint InternalVersion = 7032; //! To be incremented manually for each change to the ARMeilleure project.
 
         private const string ActualDir = "0";
         private const string BackupDir = "1";
-
-        private const string TitleIdTextDefault = "0000000000000000";
-        private const string DisplayVersionDefault = "0";
 
         public static readonly Symbol PageTableSymbol = new(SymbolType.Special, 1);
         public static readonly Symbol CountTableSymbol = new(SymbolType.Special, 2);
@@ -71,8 +68,7 @@ namespace ARMeilleure.Translation.PTC
         private bool _disposed;
         private bool _actualFileValid;
 
-        public string TitleIdText { get; private set; }
-        public string DisplayVersion { get; private set; }
+        public PtcCacheInfo CacheInfo { get; private set; }
 
         private MemoryManagerType _memoryMode;
 
@@ -101,8 +97,7 @@ namespace ARMeilleure.Translation.PTC
 
             _disposed = false;
 
-            TitleIdText = TitleIdTextDefault;
-            DisplayVersion = DisplayVersionDefault;
+            CacheInfo = new PtcCacheInfo(0, null, null, 0, null, "Unknown", "default");
 
             CachePathActual = string.Empty;
             CachePathBackup = string.Empty;
@@ -110,23 +105,33 @@ namespace ARMeilleure.Translation.PTC
             Disable();
         }
 
-        public void Initialize(string titleIdText, string displayVersion, bool enabled, MemoryManagerType memoryMode, string cacheSelector)
+        public void Initialize(PtcCacheInfo cacheInfo, bool enabled, MemoryManagerType memoryMode)
         {
             // Keep nested-dispatch binaries separate; their return pointers
             // cannot participate in per-function pinned reclamation.
+            // The UWP JIT has its own emitted-code ABI. Never share executable
+            // cache entries with desktop Ryubing, even when versions coincide.
+            string cacheSelector = cacheInfo.CacheSelector + "-ryubox";
             if (Translator.UsePinnedDispatch) cacheSelector += "-pinned-v1";
+            cacheInfo = new PtcCacheInfo(
+                cacheInfo.ProcessId, cacheInfo.TitleIdText, cacheInfo.ApplicationIdText,
+                cacheInfo.ProgramIndex, cacheInfo.DisplayVersion, cacheInfo.ProcessKind, cacheSelector);
             Wait();
 
             Profiler.Wait();
             Profiler.ClearEntries();
 
-            Logger.Info?.Print(LogClass.Ptc, $"Initializing Profiled Persistent Translation Cache v{InternalVersion}\n\t\t (title: {titleIdText}, version: '{displayVersion}', selector: '{cacheSelector}', enabled: {enabled}).");
+            CacheInfo = cacheInfo;
 
-            if (!enabled || string.IsNullOrEmpty(titleIdText) || titleIdText == TitleIdTextDefault)
+            Logger.Info?.Print(
+                LogClass.Ptc,
+                $"Initializing Profiled Persistent Translation Cache v{InternalVersion}\n\t\t " +
+                $"(pid: {cacheInfo.ProcessId}, title: {cacheInfo.TitleIdText}, application: {cacheInfo.ApplicationIdText}, " +
+                $"programIndex: {cacheInfo.ProgramIndex}, version: '{cacheInfo.DisplayVersion}', kind: {cacheInfo.ProcessKind}, " +
+                $"selector: '{cacheInfo.CacheSelector}', key: '{cacheInfo.CacheKey}', enabled: {enabled}).");
+
+            if (!enabled || cacheInfo.TitleIdText == PtcCacheInfo.TitleIdTextDefault)
             {
-                TitleIdText = TitleIdTextDefault;
-                DisplayVersion = DisplayVersionDefault;
-
                 CachePathActual = string.Empty;
                 CachePathBackup = string.Empty;
 
@@ -135,12 +140,10 @@ namespace ARMeilleure.Translation.PTC
                 return;
             }
 
-            TitleIdText = titleIdText;
-            DisplayVersion = !string.IsNullOrEmpty(displayVersion) ? displayVersion : DisplayVersionDefault;
             _memoryMode = memoryMode;
 
-            string workPathActual = Path.Combine(AppDataManager.GamesDirPath, TitleIdText, "cache", "cpu", ActualDir);
-            string workPathBackup = Path.Combine(AppDataManager.GamesDirPath, TitleIdText, "cache", "cpu", BackupDir);
+            string workPathActual = Path.Combine(AppDataManager.GamesDirPath, CacheInfo.TitleIdText, "cache", "cpu", ActualDir);
+            string workPathBackup = Path.Combine(AppDataManager.GamesDirPath, CacheInfo.TitleIdText, "cache", "cpu", BackupDir);
 
             if (!Directory.Exists(workPathActual))
             {
@@ -152,8 +155,14 @@ namespace ARMeilleure.Translation.PTC
                 Directory.CreateDirectory(workPathBackup);
             }
 
-            CachePathActual = Path.Combine(workPathActual, DisplayVersion) + "-" + cacheSelector;
-            CachePathBackup = Path.Combine(workPathBackup, DisplayVersion) + "-" + cacheSelector;
+            CachePathActual = Path.Combine(workPathActual, CacheInfo.DisplayVersion) + "-" + CacheInfo.CacheSelector;
+            CachePathBackup = Path.Combine(workPathBackup, CacheInfo.DisplayVersion) + "-" + CacheInfo.CacheSelector;
+
+            Logger.Info?.Print(
+                LogClass.Ptc,
+                $"PPTC cache owner selected (pid: {CacheInfo.ProcessId}, title: {CacheInfo.TitleIdText}, application: {CacheInfo.ApplicationIdText}, " +
+                $"version: '{CacheInfo.DisplayVersion}', kind: {CacheInfo.ProcessKind}, selector: '{CacheInfo.CacheSelector}', " +
+                $"key: '{CacheInfo.CacheKey}', path: '{CachePathActual}').");
 
             PreLoad();
             Profiler.PreLoad();
@@ -481,7 +490,12 @@ namespace ARMeilleure.Translation.PTC
             ValidateLoadedEntries();
             long fileSize = new FileInfo(fileName).Length;
 
-            Logger.Info?.Print(LogClass.Ptc, $"{(isBackup ? "Loaded Backup Translation Cache" : "Loaded Translation Cache")} (size: {fileSize} bytes, translated functions: {GetEntriesCount()}).");
+            Logger.Info?.Print(
+                LogClass.Ptc,
+                $"{(isBackup ? "Loaded Backup Translation Cache" : "Loaded Translation Cache")} " +
+                $"(pid: {CacheInfo.ProcessId}, title: {CacheInfo.TitleIdText}, version: '{CacheInfo.DisplayVersion}', kind: {CacheInfo.ProcessKind}, " +
+                $"selector: '{CacheInfo.CacheSelector}', key: '{CacheInfo.CacheKey}', path: '{fileName}', " +
+                $"size: {fileSize} bytes, translated functions: {GetEntriesCount()}).");
 
             return true;
         }

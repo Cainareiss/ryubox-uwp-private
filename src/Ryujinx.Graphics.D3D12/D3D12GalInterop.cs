@@ -102,7 +102,10 @@ public sealed unsafe partial class D3D12NativeDevice
     }
     internal void Draw(D3D12Program program, ReadOnlySpan<D3D12ProgramBinding> bindings, ref NativeDraw draw, NativeDepthState? depth = null)
     {
-        var native = ConvertBindings(bindings);
+        Span<NativeProgramBinding> native = bindings.Length <= StackBindingCount
+            ? stackalloc NativeProgramBinding[bindings.Length]
+            : new NativeProgramBinding[bindings.Length];
+        ConvertBindings(bindings, native);
         fixed (NativeProgramBinding* pointer = native)
         fixed (NativeDraw* packet = &draw)
         {

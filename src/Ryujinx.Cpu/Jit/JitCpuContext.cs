@@ -1,6 +1,7 @@
 using ARMeilleure.Common;
 using ARMeilleure.Memory;
 using ARMeilleure.Translation;
+using ARMeilleure.Translation.PTC;
 using Ryujinx.Cpu.Signal;
 using System.Threading;
 
@@ -11,12 +12,14 @@ namespace Ryujinx.Cpu.Jit
         private readonly ITickSource _tickSource;
         private readonly Translator _translator;
         private readonly IMemoryManager _memory;
+        private readonly GuestAddressWriteProbe _guestAddressWriteProbe;
         private int _disposed;
 
         public JitCpuContext(ITickSource tickSource, IMemoryManager memory, bool for64Bit)
         {
             _tickSource = tickSource;
             _memory = memory;
+            _guestAddressWriteProbe = GuestAddressWriteProbe.Create(memory);
             
             bool sparse = memory.Type is not MemoryManagerType.SoftwareMmu and not MemoryManagerType.SoftwarePageTable;
             IAddressTable<ulong> functionTable = sparse ? SparseAddressTable<ulong>.CreateForArm(for64Bit) : AddressTable<ulong>.CreateForArm(for64Bit);
@@ -48,7 +51,10 @@ namespace Ryujinx.Cpu.Jit
         /// <inheritdoc/>
         public void Execute(IExecutionContext context, ulong address)
         {
-            _translator.Execute(((JitExecutionContext)context).Impl, address);
+            using (GuestAddressWriteProbe.Enter(((JitExecutionContext)context).Impl))
+            {
+                _translator.Execute(((JitExecutionContext)context).Impl, address);
+            }
         }
 
         /// <inheritdoc/>
@@ -58,9 +64,9 @@ namespace Ryujinx.Cpu.Jit
         }
 
         /// <inheritdoc/>
-        public IDiskCacheLoadState LoadDiskCache(string titleIdText, string displayVersion, bool enabled, string cacheSelector)
+        public IDiskCacheLoadState LoadDiskCache(PtcCacheInfo cacheInfo, bool enabled)
         {
-            return new JitDiskCacheLoadState(_translator.LoadDiskCache(titleIdText, displayVersion, enabled, cacheSelector));
+            return new JitDiskCacheLoadState(_translator.LoadDiskCache(cacheInfo, enabled));
         }
 
         /// <inheritdoc/>
@@ -78,6 +84,7 @@ namespace Ryujinx.Cpu.Jit
             }
 
             _memory.UnmapEvent -= UnmapHandler;
+            _guestAddressWriteProbe?.Dispose();
             // Wake and join optional High-CQ workers even when a guest fault
             // bypasses Translator.Execute's normal last-thread cleanup.
             _translator.StopBackgroundTranslators();

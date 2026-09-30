@@ -374,19 +374,12 @@ namespace Ryujinx.Tests.Memory
             // The double page handles should be disposed, as they were split into granular handles.
             foreach (RegionHandle doublePage in doublePages)
             {
-                // These should have been disposed.
-                bool throws = false;
-
-                try
-                {
-                    doublePage.Dispose();
-                }
-                catch (ObjectDisposedException)
-                {
-                    throws = true;
-                }
-
-                Assert.IsTrue(throws);
+                // Disposal is idempotent, so observe the disposed state instead
+                // of using a second Dispose exception as the ownership probe.
+                var disposed = typeof(RegionHandle).GetField("_disposed",
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+                Assert.IsTrue((bool)disposed.GetValue(doublePage));
+                Assert.DoesNotThrow(() => doublePage.Dispose());
             }
 
             IEnumerable<IRegionHandle> combinedHandles = combined.Handles;

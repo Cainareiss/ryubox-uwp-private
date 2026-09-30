@@ -57,6 +57,16 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
         }
 
         public TimedAction() { }
+        public void CancelAndJoin()
+        {
+            Thread thread;
+            lock (_lock)
+            {
+                if (_cancelled != null) Volatile.Write(ref _cancelled.Value, true);
+                thread = _thread;
+            }
+            if (thread != null && thread != Thread.CurrentThread) thread.Join();
+        }
 
         private void Reset(Thread thread, TRef<bool> cancelled)
         {

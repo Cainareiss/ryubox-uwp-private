@@ -53,7 +53,7 @@ struct RyuboxD3D12DescriptorStats
     uint64_t estimatedHeapBytes;
 };
 RYUBOX_D12 RyuboxD3D12_GetDescriptorStats(void* context, RyuboxD3D12DescriptorStats* stats);
-// Versioned timing and render-pass counters. Values are cumulative for the
+// Version 3 timing, render-pass, descriptor-table and swap-chain Present counters. Values are cumulative for the
 // context and are collected without flushing or waiting for the GPU queue.
 struct RyuboxD3D12PerformanceStats
 {
@@ -63,6 +63,16 @@ struct RyuboxD3D12PerformanceStats
     uint64_t psoMicroseconds, descriptorBindMicroseconds, recordMicroseconds;
     uint64_t submitMicroseconds, presentMicroseconds, fenceWaitMicroseconds;
     uint64_t depthAttachmentsDetached, invalidRenderPasses, uavBarriers;
+    uint64_t descriptorTableCacheHits, descriptorTableCacheMisses, descriptorCopies;
+    // Counts DXGI Present calls for a real swap chain. A successful HRESULT
+    // does not prove that photons reached a physical display.
+    uint64_t presentAttempts, presentSuccess;
+    uint64_t lastPresentFence;
+    uint64_t lastPresentQpc;
+    int32_t lastPresentResult;
+    uint32_t lastPresentWidth, lastPresentHeight;
+    uint32_t presentationTarget; // 0=offscreen, 1=HWND, 2=composition panel
+    uint32_t reserved;
 };
 RYUBOX_D12 RyuboxD3D12_GetPerformanceStats(void* context, RyuboxD3D12PerformanceStats* stats);
 RYUBOX_D12 RyuboxD3D12_BeginFrame(void* context, float r, float g, float b, float a);
@@ -72,6 +82,7 @@ RYUBOX_D12 RyuboxD3D12_Resize(void* context, uint32_t width, uint32_t height);
 RYUBOX_D12 RyuboxD3D12_SetCompositionScale(void* context, float x, float y);
 
 RYUBOX_D12 RyuboxD3D12_CreateBuffer(void* context, uint64_t bytes, uint64_t* resource);
+RYUBOX_D12 RyuboxD3D12_RetainBuffer(void* context, uint64_t source, uint64_t* resource);
 RYUBOX_D12 RyuboxD3D12_CreateTextureRgba8(void* context, uint32_t width, uint32_t height, uint64_t* resource);
 // Typed 2D color textures. Format and sample support are checked on the device;
 // unsupported formats/samples fail before resource creation.
@@ -110,6 +121,9 @@ RYUBOX_D12 RyuboxD3D12_DrawTexture(void* context, uint64_t resource,
 // Explicit synchronous diagnostics, never used by the normal present path.
 // Require a closed frame. Output is tightly packed, top-left first, RGBA8.
 RYUBOX_D12 RyuboxD3D12_ReadBuffer(void* context, uint64_t resource, uint64_t offset,
+    void* destination, uint64_t bytes);
+// Reads the last submitted contents without disturbing an open graphics list.
+RYUBOX_D12 RyuboxD3D12_ReadSubmittedBuffer(void* context, uint64_t resource, uint64_t offset,
     void* destination, uint64_t bytes);
 RYUBOX_D12 RyuboxD3D12_Capture(void* context, void* destination, uint64_t bytes);
 RYUBOX_D12 RyuboxD3D12_GetLastDiagnostic(void* context, char* data, uint32_t capacity);

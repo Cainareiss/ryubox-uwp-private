@@ -15,6 +15,7 @@ internal sealed class CoreHostSettings
     public bool IgnoreMissingServices = true;
     public bool FsIntegrityChecks = true;
     public bool Ptc;
+    public bool ShaderCache;
     public string MemoryManagerMode = "SoftwarePageTable";
     public bool Hypervisor;
     public bool FastMemory = true;
@@ -65,6 +66,7 @@ internal sealed class CoreHostSettings
             value.IgnoreMissingServices = ReadBoolean(root, "ignoreMissingServices", value.IgnoreMissingServices);
             value.FsIntegrityChecks = ReadBoolean(root, "fsIntegrityChecks", value.FsIntegrityChecks);
             value.Ptc = ReadBoolean(root, "ptc", value.Ptc);
+            value.ShaderCache = ReadBoolean(root, "shaderCache", value.ShaderCache);
             value.MemoryManagerMode = ReadString(root, "memoryManagerMode", value.MemoryManagerMode);
             value.Hypervisor = ReadBoolean(root, "hypervisor", value.Hypervisor);
             value.FastMemory = ReadBoolean(root, "fastMemory", value.FastMemory);
@@ -90,7 +92,9 @@ internal sealed class CoreHostSettings
             value.MemoryManagerMode = "SoftwarePageTable";
             value.Hypervisor = false;
             value.FastMemory = true;
-            value.ResolutionScale = 1.0f;
+            // Preserve the requested scale; forcing 1x made this setting
+            // decorative. Bound it to a range that remains viable on Xbox.
+            value.ResolutionScale = Math.Clamp(value.ResolutionScale, 0.5f, 2.0f);
             value.AudioVolume = Math.Clamp(value.AudioVolume, 0.0f, 1.0f);
             value.TimeZone = string.IsNullOrWhiteSpace(value.TimeZone) ? "UTC" : value.TimeZone;
             value.Language = string.IsNullOrWhiteSpace(value.Language) ? "AmericanEnglish" : value.Language;

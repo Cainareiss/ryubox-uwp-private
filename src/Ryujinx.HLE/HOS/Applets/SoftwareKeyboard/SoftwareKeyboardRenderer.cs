@@ -2,6 +2,8 @@ using Ryujinx.HLE.UI;
 using Ryujinx.Memory;
 using System;
 using System.Threading;
+using Ryujinx.Common.Logging;
+using SkiaSharp;
 
 namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
 {
@@ -16,14 +18,27 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
         private readonly object _stateLock = new();
 
         private readonly SoftwareKeyboardUIState _state = new();
-        private readonly SoftwareKeyboardRendererBase _renderer;
+        private readonly IKeyboardSurface _renderer;
 
         private readonly TimedAction _textBoxBlinkTimedAction = new();
         private readonly TimedAction _renderAction = new();
 
         public SoftwareKeyboardRenderer(IHostUITheme uiTheme)
         {
-            _renderer = new SoftwareKeyboardRendererBase(uiTheme);
+            // Probe BEFORE constructing SKBitmap/SKSurface. A failed native
+            // load from an SKObject constructor can also throw on its finalizer.
+            try
+            {
+                SkiaSharpVersion.CheckNativeLibraryCompatible(throwIfIncompatible: true);
+                _renderer = new SoftwareKeyboardRendererBase(uiTheme);
+            }
+            catch (Exception error) when (error is DllNotFoundException or EntryPointNotFoundException or
+                BadImageFormatException or TypeInitializationException or InvalidOperationException)
+            {
+                Logger.Warning?.Print(LogClass.ServiceAm,
+                    $"Inline keyboard native rasterizer unavailable; using managed bitmap renderer: {error.GetType().Name}");
+                _renderer = new ManagedKeyboardSurface();
+            }
 
             StartTextBoxBlinker(_textBoxBlinkTimedAction, _state, _stateLock);
             StartRenderer(_renderAction, _renderer, _state, _stateLock);
@@ -45,7 +60,7 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
             }, TextBoxBlinkSleepMilliseconds);
         }
 
-        private static void StartRenderer(TimedAction timedAction, SoftwareKeyboardRendererBase renderer, SoftwareKeyboardUIState state, object stateLock)
+        private static void StartRenderer(TimedAction timedAction, IKeyboardSurface renderer, SoftwareKeyboardUIState state, object stateLock)
         {
             SoftwareKeyboardUIState internalState = new();
 
@@ -84,6 +99,7 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
                 if (canCreateSurface)
                 {
                     renderer.CreateSurface(internalState.SurfaceInfo);
+                    needsUpdate = true;
                 }
 
                 if (needsUpdate)
@@ -162,8 +178,9 @@ namespace Ryujinx.HLE.HOS.Applets.SoftwareKeyboard
 
         public void Dispose()
         {
-            _textBoxBlinkTimedAction.RequestCancel();
-            _renderAction.RequestCancel();
+            _textBoxBlinkTimedAction.CancelAndJoin();
+            _renderAction.CancelAndJoin();
+            _renderer.Dispose();
         }
     }
 }

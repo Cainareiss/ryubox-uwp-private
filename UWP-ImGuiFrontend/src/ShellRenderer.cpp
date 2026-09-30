@@ -1,11 +1,13 @@
 #include "UwpImGuiFrontend/ShellRenderer.h"
 #include "UwpImGuiFrontend/Text.h"
+#include "UwpImGuiFrontend/Views.h"
 #include "UwpImGuiFrontend/Widgets.h"
 
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 #include <map>
 #include <random>
@@ -803,6 +805,16 @@ public:
 			subtitle = item.metadata.developer;
 		if (!item.format.empty())
 			subtitle += (subtitle.empty() ? "" : "  •  ") + item.format;
+		const std::string mode = item.consoleMode.empty() ? "Docked" : item.consoleMode;
+		char scale[16]{};
+		std::snprintf(scale, sizeof(scale), "%.1fx", item.resolutionScale);
+		subtitle += (subtitle.empty() ? "" : "  •  ") + mode + "  •  " + scale;
+		if (item.favorite)
+			subtitle += "  •  Favorite";
+		if (item.updateActive)
+			subtitle += "  •  Update";
+		if (item.modsActive)
+			subtitle += "  •  Mods";
 		if (!item.region.empty())
 			subtitle += (subtitle.empty() ? "" : "  •  ") + item.region;
 		if (!subtitle.empty())
@@ -1170,6 +1182,38 @@ public:
 			theme, notifications);
 		BeginPendingLaunch(context, frontend, presentation);
 		DrawLaunchAnimation(draw, context, frontend, theme, dt);
+		if (const LibraryItem* contextItem = frontend.ContextItem())
+		{
+			TitleOptionsModel model;
+			model.title = contextItem->name;
+			if (contextItem->contentId != 0)
+			{
+				char titleId[17]{};
+				std::snprintf(titleId, sizeof(titleId), "%016llX",
+					static_cast<unsigned long long>(contextItem->contentId));
+				model.titleId = titleId;
+			}
+			model.subtitle = contextItem->platform;
+			model.metadata = contextItem->metadata;
+			model.actions = MakeDefaultTitleOptionActions(contextItem->favorite);
+			char resolution[16]{};
+			std::snprintf(resolution, sizeof(resolution), "%.1fx", contextItem->resolutionScale);
+			model.information = {
+				{ "Console mode", contextItem->consoleMode },
+				{ "Resolution", resolution },
+				{ "Update", contextItem->updateActive ? "Active" : "Not installed" },
+				{ "Mods", contextItem->modsActive ? "Enabled" : "Disabled" },
+			};
+			if (const MediaAsset* cover = FindMedia(*contextItem, MediaKind::Cover2D))
+				model.artwork = Texture(cover->path);
+			const UnitRect panel = CenteredPanel(context, 1080.0f, 610.0f, 28.0f);
+			const TitleOptionsResult options = DrawTitleOptionsView(context,
+				ImGui::GetForegroundDrawList(), panel, m_titleOptions, model, frontendFont);
+			if (options.closeRequested)
+				frontend.CloseContextMenu();
+			else if (options.activatedAction)
+				frontend.ActivateContextAction(*options.activatedAction);
+		}
 		ImGui::End();
 		ImGui::PopStyleVar();
 		if (frontendFont)
@@ -1182,6 +1226,7 @@ private:
 	std::vector<FloatingShape> m_shapes;
 	ImVec2 m_shapeArea{};
 	std::map<std::size_t, float> m_focusAmounts;
+	TitleOptionsState m_titleOptions;
 	float m_carouselVisualIndex = 0.0f;
 	bool m_carouselInitialized = false;
 	std::size_t m_lastPage = static_cast<std::size_t>(-1);

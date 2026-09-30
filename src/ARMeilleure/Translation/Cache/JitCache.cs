@@ -40,6 +40,7 @@ namespace ARMeilleure.Translation.Cache
 
         private readonly List<ReservedRegion> _jitRegions = [];
         private readonly int _maxRegions;
+        internal int MaxRegions => _maxRegions;
         private static JitCache _activeInstance;
         private bool _disposed;
         private long _allocations;
@@ -244,15 +245,15 @@ namespace ARMeilleure.Translation.Cache
 
             // Do not invoke Refresh here: its trim callbacks run external code
             // while this cache lock is held. Use the host's sampled budget.
-            // Admission accounts for a full future region, although commitment
-            // remains lazy, and leaves headroom for the guest/GPU/compiler.
-            var budget = RuntimeMemoryBudget.LastSnapshot;
+            // Reservation leaves process headroom; physical commitment is
+            // checked separately for each expansion by CommitAllocation.
+            long effectiveUsage = RuntimeMemoryBudget.GetEffectiveUsageNoTrim();
             if (_jitRegions.Count >= DefaultMaxRegions &&
-                !CanGrowWithinBudget(budget.EffectiveUsage, RuntimeMemoryBudget.Limit))
+                !CanGrowWithinBudget(effectiveUsage, RuntimeMemoryBudget.Limit))
             {
                 _allocationFailures++;
                 throw new JitCacheFullException(
-                    $"JIT cache growth denied by process budget: usage={budget.EffectiveUsage}, " +
+                    $"JIT cache growth denied by process budget: usage={effectiveUsage}, " +
                     $"limit={RuntimeMemoryBudget.Limit}, regions={_jitRegions.Count}.");
             }
 
@@ -286,14 +287,14 @@ namespace ARMeilleure.Translation.Cache
                 ReservedRegion region = GetRegion(offset);
                 ulong desiredSize = (ulong)(offset % (int)CacheSize) + (ulong)size;
                 int additionalCommit = checked((int)region.GetAdditionalCommitSize(desiredSize));
-                var budget = RuntimeMemoryBudget.LastSnapshot;
+                long effectiveUsage = RuntimeMemoryBudget.GetEffectiveUsageNoTrim();
                 // Reusing retired code does not consume commit. Charging its
                 // size again makes eviction recovery fail under pressure.
-                if (additionalCommit > 0 && budget.EffectiveUsage > 0 && RuntimeMemoryBudget.Limit > 0 &&
-                    !CanCommitWithinBudget(budget.EffectiveUsage, RuntimeMemoryBudget.Limit, additionalCommit))
+                if (additionalCommit > 0 && effectiveUsage > 0 && RuntimeMemoryBudget.Limit > 0 &&
+                    !CanCommitWithinBudget(effectiveUsage, RuntimeMemoryBudget.Limit, additionalCommit))
                 {
                     throw new JitCacheFullException(
-                        $"JIT code-page commit denied by process budget: usage={budget.EffectiveUsage}, " +
+                        $"JIT code-page commit denied by process budget: usage={effectiveUsage}, " +
                         $"limit={RuntimeMemoryBudget.Limit}, requested={size}, additionalCommit={additionalCommit}, regions={_jitRegions.Count}.");
                 }
 
@@ -337,17 +338,16 @@ namespace ARMeilleure.Translation.Cache
 
         private static bool CanGrowWithinBudget(long usage, long limit)
         {
-            const long headroom = 512L * 1024 * 1024;
-            return usage > 0 && limit >= CacheSize + headroom &&
-                usage <= limit - CacheSize - headroom;
+            // Reserve process headroom; committed pages are admitted separately below.
+            const long headroom = 128L * 1024 * 1024;
+            return usage > 0 && limit >= headroom && usage <= limit - headroom;
         }
 
         private static bool CanCommitWithinBudget(long usage, long limit, int requestedBytes)
         {
-            // Keep well clear of the historical Windows 1455 failure near
-            // 4.97 GiB while allowing one additional 64 MiB commit window for
-            // large cold starts that otherwise stop at 4.83 GiB.
-            const long headroom = 448L * 1024 * 1024;
+            // MEM_COMMIT is independently preflighted against the reported
+            // process quota; keep emergency room for GPU/OS operations.
+            const long headroom = 128L * 1024 * 1024;
             return limit >= headroom + requestedBytes && usage <= limit - headroom - requestedBytes;
         }
 
@@ -356,12 +356,12 @@ namespace ARMeilleure.Translation.Cache
             object configured = AppContext.GetData("Ryujinx.Uwp.JitCacheMaxRegions");
             if (configured is int configuredInteger)
             {
-                return Math.Clamp(configuredInteger, DefaultMaxRegions, 6);
+                return Math.Clamp(configuredInteger, DefaultMaxRegions, 8);
             }
 
             if (configured is string configuredText && int.TryParse(configuredText, out int configuredValue))
             {
-                return Math.Clamp(configuredValue, DefaultMaxRegions, 6);
+                return Math.Clamp(configuredValue, DefaultMaxRegions, 8);
             }
 
             return DefaultMaxRegions;

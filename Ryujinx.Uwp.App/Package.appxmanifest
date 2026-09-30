@@ -9,7 +9,7 @@
   <Identity
     Name="Ryujinx.Xbox.UWP"
     Publisher="CN=Ryujinx Xbox Dev"
-    Version="0.2.0.127" />
+    Version="0.2.0.136" />
 
   <mp:PhoneIdentity
     PhoneProductId="d2e4e7aa-7d52-46d7-94fb-bb6ba99f9f58"

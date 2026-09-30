@@ -399,6 +399,7 @@ namespace ARMeilleure.Instructions
 
         public static Operand EmitPtPointerLoad(ArmEmitterContext context, Operand address, Operand lblSlowPath, bool write, int size)
         {
+            context.AccessProbe?.Emit(context, address, write, size);
             if (context.Memory.Type.IsHostMapped)
             {
                 return EmitHostMappedPointer(context, address);
