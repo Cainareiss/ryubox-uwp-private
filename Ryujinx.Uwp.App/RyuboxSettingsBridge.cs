@@ -15,7 +15,7 @@ namespace Ryujinx.Uwp.App
     internal sealed class RyuboxCoreSettings
     {
         [DataMember(Name = "schemaVersion")] public int SchemaVersion = 1;
-        [DataMember(Name = "backend")] public string Backend = "D3D11";
+        [DataMember(Name = "backend")] public string Backend = "D3D12";
         [DataMember(Name = "consoleMode")] public string ConsoleMode = "Handheld";
         [DataMember(Name = "language")] public string Language = "AmericanEnglish";
         [DataMember(Name = "region")] public string Region = "USA";
@@ -53,7 +53,7 @@ namespace Ryujinx.Uwp.App
         {
             RyuboxCoreSettings value = candidate ?? CreateDefault();
             value.SchemaVersion = 1;
-            value.Backend = "D3D11";
+            value.Backend = "D3D12";
             value.ConsoleMode = "Handheld";
             value.MemoryManagerMode = "SoftwarePageTable";
             value.Hypervisor = false;
@@ -112,7 +112,7 @@ namespace Ryujinx.Uwp.App
 
         internal string GetStatusText()
         {
-            return "D3D11 nativo • portátil • V-Sync " + (VSync ? "ativo" : "desativado")
+            return "D3D12 nativo • portátil • V-Sync " + (VSync ? "ativo" : "desativado")
                 + " • escala gráfica: compatibilidade pendente";
         }
     }

@@ -143,11 +143,6 @@ namespace Ryujinx.Uwp.App
                 result.SelectedBackend = "D3D12";
                 result.Summary = "Frontend Direct3D 12 nativo inicializado; CoreHost usa lease da mesma superficie, sem D3D11/Dozen.";
             }
-            else if (nativeHost && direct3D && d3d11Host && spirvCross)
-            {
-                result.SelectedBackend = "D3D11";
-                result.Summary = "Direct3D 11 nativo pronto; Vulkan e Mesa Dozen nao participam deste caminho.";
-            }
             else if (nativeHost && direct3D && dozenDriver && dozenRuntime && vulkanLoader)
             {
                 result.SelectedBackend = "D3D12-Dozen";
@@ -158,7 +153,7 @@ namespace Ryujinx.Uwp.App
             else if (nativeHost && direct3D)
             {
                 result.SelectedBackend = "D3D12";
-                result.Summary = "Host Direct3D encontrado, mas o compilador SPIR-V do backend D3D11 esta ausente.";
+                result.Summary = "Host Direct3D 12 encontrado, mas o compilador SPIR-V esta ausente do pacote.";
             }
             else if (direct3D)
             {
@@ -187,7 +182,14 @@ namespace Ryujinx.Uwp.App
             out string error)
         {
             error = string.Empty;
-            bool useD3D11 = string.Equals(requestedBackend, "D3D11", StringComparison.OrdinalIgnoreCase);
+            if (!string.Equals(requestedBackend, "D3D12", StringComparison.OrdinalIgnoreCase))
+            {
+                error = "Somente o Direct3D 12 e suportado; backend solicitado: " + requestedBackend + ".";
+                UwpFrontendLog.Write("graphics", error);
+                return false;
+            }
+
+            bool useD3D11 = false;
 
             if (_started && _usingD3D11 == useD3D11 && ReferenceEquals(_boundPanel, panel))
             {

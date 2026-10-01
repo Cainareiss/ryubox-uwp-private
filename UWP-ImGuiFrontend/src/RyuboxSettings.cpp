@@ -505,7 +505,7 @@ void DrawLogs(RyuboxLogSettings& model, const RyuboxSettingsCallbacks& callbacks
 	DrawToggle("logs.graphics", model.graphicsDebug, callbacks);
 
 	MiddleColumn();
-	SectionTitle("Ryubox D3D11 Diagnostics");
+	SectionTitle("Ryubox D3D12 Diagnostics");
 	DrawToggle("logs.shaderTelemetry", model.shaderTelemetry, callbacks);
 	DrawToggle("logs.performanceCsv", model.performanceCsv, callbacks);
 	DrawToggle("logs.textureView", model.textureViewFailures, callbacks);
@@ -569,7 +569,7 @@ void DrawGraphicsPage(RyuboxGraphicsSettings& model,
 {
 	// Keep video settings on one stable widget lane. This avoids the nested
 	// table path that was crashing when Xbox focus entered the video page.
-	SectionTitle("Video / D3D11");
+	SectionTitle("Video / D3D12");
 	DrawChoice("graphics.backend", model.backend, callbacks);
 	DrawChoice("graphics.gpu", model.preferredGpu, callbacks);
 	DrawChoice("graphics.resolutionScale", model.resolutionScale, callbacks);
@@ -589,7 +589,7 @@ void DrawGraphicsPage(RyuboxGraphicsSettings& model,
 	DrawToggle("graphics.colorSpace", model.colorSpacePassthrough, callbacks);
 	DrawToggle("graphics.showFpsCounter", model.showFpsCounter, callbacks);
 	ImGui::Spacing();
-	SectionTitle("D3D11 / Xbox — status, nao toggles de compatibilidade");
+	SectionTitle("D3D12 / Xbox — status, nao toggles de compatibilidade");
 	ImGui::TextDisabled("Crop normalization: %s", model.nativeCropNormalization ? "ativo" : "inativo");
 	ImGui::TextDisabled("Subresource hazards: %s", model.subresourceHazards ? "ativo" : "inativo");
 	ImGui::TextDisabled("GPU-only presentation: %s", model.gpuOnlyPresentation ? "ativo" : "inativo");
@@ -723,7 +723,7 @@ RyuboxSettingsModel MakeDefaultRyuboxSettingsModel()
 	model.cpu.hypervisor = { "Hypervisor", false, false, false };
 	model.cpu.fastMemory = { "Fast memory mode", true, true, false };
 
-	model.graphics.backend = { "Backend", choices({ "D3D11 Native" }), 0, true, false };
+	model.graphics.backend = { "Backend", choices({ "D3D12 Native" }), 0, true, false };
 	model.graphics.preferredGpu = { "GPU", choices({ "Xbox GPU" }), 0, true, false };
 	model.graphics.resolutionScale = { "Escala de resolucao", choices({ "0.5x", "0.75x", "1x", "1.5x", "2x", "3x", "Custom" }), 2, true, false };
 	model.graphics.customResolutionScale = { "Escala custom", 1.0f, 0.5f, 4.0f, "%.2fx", true, false };
@@ -952,7 +952,7 @@ RyuboxQuickViewResult DrawRyuboxGraphicsQuickView(
 			ImGui::EndTable();
 		}
 		ImGui::Spacing();
-		SectionTitle("D3D11 status");
+		SectionTitle("D3D12 status");
 		DrawStatusPill("Crop normalization: ON", model.nativeCropNormalization);
 		DrawStatusPill("Subresource hazards: ON", model.subresourceHazards);
 		DrawStatusPill(model.gpuOnlyPresentation ? "GPU-only presentation: ON" : "GPU-only presentation: pending",

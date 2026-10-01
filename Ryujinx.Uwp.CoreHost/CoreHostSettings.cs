@@ -6,7 +6,7 @@ namespace Ryujinx.Uwp.CoreHost;
 internal sealed class CoreHostSettings
 {
     public int SchemaVersion = 1;
-    public string Backend = "D3D11";
+    public string Backend = "D3D12";
     public string ConsoleMode = "Handheld";
     public string Language = "AmericanEnglish";
     public string Region = "USA";
@@ -37,12 +37,9 @@ internal sealed class CoreHostSettings
 
     public static CoreHostSettings CreateDefault() => new CoreHostSettings();
 
-    public static string NormalizeBackend(string backend)
-    {
-        return string.Equals(backend, "D3D12", StringComparison.OrdinalIgnoreCase)
-            ? "D3D12"
-            : "D3D11";
-    }
+    // Direct3D 12 is the only supported renderer. Older settings snapshots
+    // and frontends that still request D3D11/Vulkan are mapped to it.
+    public static string NormalizeBackend(string backend) => "D3D12";
 
     public static CoreHostSettings FromJson(string json)
     {
