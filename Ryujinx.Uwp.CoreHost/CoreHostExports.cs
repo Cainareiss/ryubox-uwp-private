@@ -904,9 +904,11 @@ namespace Ryujinx.Uwp.CoreHost
                         _activeSettings.TimeZone,
                         // The Xbox UWP sandbox repeatedly returned Win32 0x5AF
                         // while committing the HostMapped paging-file section.
-                        // SoftwarePageTable keeps guest DRAM in a private reserved
-                        // block and removes that mirrored-section failure mode.
-                        MemoryManagerMode.SoftwarePageTable,
+                        // SoftwarePageTable stays the default. HostMappedUnsafe is
+                        // opt-in (RYUJINX_UWP_MEMORY_MODE=hostunsafe) and falls back
+                        // to SoftwarePageTable automatically if DRAM or the address
+                        // space cannot be created.
+                        ResolveMemoryManagerMode(),
                         _activeSettings.IgnoreMissingServices,
                         ToAspectRatio(_activeSettings.AspectRatio),
                         _activeSettings.AudioEnabled ? _activeSettings.AudioVolume : 0.0f,
@@ -3681,6 +3683,33 @@ namespace Ryujinx.Uwp.CoreHost
         {
             return programId == 0x010003F003A34000UL;
         }
+
+        private static MemoryManagerMode ResolveMemoryManagerMode()
+
+        {
+
+            string value = Environment.GetEnvironmentVariable("RYUJINX_UWP_MEMORY_MODE");
+
+            MemoryManagerMode mode = value?.Trim().ToLowerInvariant() switch
+
+            {
+
+                "hostunsafe" or "hostmappedunsafe" => MemoryManagerMode.HostMappedUnsafe,
+
+                "hostmapped" => MemoryManagerMode.HostMapped,
+
+                _ => MemoryManagerMode.SoftwarePageTable,
+
+            };
+
+            CoreHostLog.Write("memory", "Requested memory manager mode: " + mode +
+
+                (mode == MemoryManagerMode.SoftwarePageTable ? "" : " (falls back to SoftwarePageTable on 0x5AF)"));
+
+            return mode;
+
+        }
+
 
         private static bool IsPtcOptedIn()
         {

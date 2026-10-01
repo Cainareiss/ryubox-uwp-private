@@ -1248,6 +1248,53 @@ public:
         uploadBytes -= released;
     }
 
+    // Readback staging is reused across synchronous reads instead of
+    // creating a committed READBACK resource per call. Every user waits for
+    // its copy before returning and all callers hold context.mutex, so one
+    // grow-only buffer plus one side allocator/list is enough.
+    static constexpr UINT64 ReadbackPoolMinBytes = 64ull * 1024;
+    static constexpr UINT64 ReadbackPoolMaxBytes = 64ull * 1024 * 1024;
+    ComPtr<ID3D12Resource> readbackPool;
+    UINT64 readbackPoolBytes = 0;
+    ComPtr<ID3D12CommandAllocator> sideAllocator;
+    ComPtr<ID3D12GraphicsCommandList> sideList;
+
+    ComPtr<ID3D12Resource> AcquireReadback(UINT64 bytes)
+    {
+        if (bytes > ReadbackPoolMaxBytes)
+        {
+            ComPtr<ID3D12Resource> oneShot;
+            auto heap = Heap(D3D12_HEAP_TYPE_READBACK);
+            auto desc = BufferDesc(bytes);
+            Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&oneShot)));
+            return oneShot;
+        }
+        if (!readbackPool || readbackPoolBytes < bytes)
+        {
+            UINT64 capacity = ReadbackPoolMinBytes;
+            while (capacity < bytes) capacity <<= 1;
+            readbackPool.Reset();
+            readbackPoolBytes = 0;
+            auto heap = Heap(D3D12_HEAP_TYPE_READBACK);
+            auto desc = BufferDesc(capacity);
+            Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readbackPool)));
+            readbackPoolBytes = capacity;
+        }
+        return readbackPool;
+    }
+
+    UINT64 TrimReadbackPool()
+    {
+        // Safe: synchronous readers finished before releasing context.mutex.
+        // Frames may still retain a reference; the memory goes when they drop it.
+        UINT64 released = readbackPoolBytes;
+        readbackPool.Reset();
+        readbackPoolBytes = 0;
+        return released;
+    }
+
     UINT64 TrimIdleUploads()
     {
         // Called under context.mutex. Only slots whose submitted work has
@@ -1258,7 +1305,7 @@ public:
         UINT64 before = uploadBytes;
         for (UINT i = 0; i < FrameCount; ++i)
             if (i != frameIndex && frames[i].fence <= completed) TrimUploadPages(frames[i]);
-        return before - uploadBytes;
+        return before - uploadBytes + TrimReadbackPool();
     }
 
     static bool IsPlanarDepthStencil(DXGI_FORMAT format)
@@ -2221,11 +2268,7 @@ float4 PS(Vertex v) : SV_Target { return image.Sample(nearestClamp, v.uv); }
         // read safe. Waiting for all earlier work here adds a CPU/GPU bubble
         // before even recording the readback command. BeginCommands still
         // waits before reusing a frame's allocator/upload storage.
-        ComPtr<ID3D12Resource> readback;
-        auto heap = Heap(D3D12_HEAP_TYPE_READBACK);
-        auto desc = BufferDesc(total);
-        Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)));
+        ComPtr<ID3D12Resource> readback = AcquireReadback(total);
         BeginCommands();
         auto readbackOwner = std::make_shared<Resource>();
         readbackOwner->object = readback;
@@ -2274,17 +2317,22 @@ float4 PS(Vertex v) : SV_Target { return image.Sample(nearestClamp, v.uv); }
             return;
         }
 
-        ComPtr<ID3D12Resource> readback;
-        auto heap = Heap(D3D12_HEAP_TYPE_READBACK);
-        auto desc = BufferDesc(size);
-        Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)));
+        ComPtr<ID3D12Resource> readback = AcquireReadback(size);
 
-        ComPtr<ID3D12CommandAllocator> allocator;
-        ComPtr<ID3D12GraphicsCommandList> list;
-        Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&allocator)));
-        Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, allocator.Get(),
-            nullptr, IID_PPV_ARGS(&list)));
+        // The side allocator is reused: the previous side copy was waited on
+        // before its caller returned, so Reset is legal here.
+        if (!sideAllocator)
+        {
+            Check(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&sideAllocator)));
+            Check(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, sideAllocator.Get(),
+                nullptr, IID_PPV_ARGS(&sideList)));
+        }
+        else
+        {
+            Check(sideAllocator->Reset());
+            Check(sideList->Reset(sideAllocator.Get(), nullptr));
+        }
+        auto& list = sideList;
         list->CopyBufferRegion(readback.Get(), 0, resource->object.Get(), offset, size);
         Check(list->Close());
         ID3D12CommandList* lists[] = {list.Get()};
@@ -2349,11 +2397,7 @@ float4 PS(Vertex v) : SV_Target { return image.Sample(nearestClamp, v.uv); }
         layout.Footprint.RowPitch = static_cast<UINT>(Align(rowBytes, D3D12_TEXTURE_DATA_PITCH_ALIGNMENT));
         UINT64 nativeDepthPitch = static_cast<UINT64>(layout.Footprint.RowPitch) * height;
         UINT64 total = nativeDepthPitch * depth;
-        ComPtr<ID3D12Resource> readback;
-        auto heap = Heap(D3D12_HEAP_TYPE_READBACK);
-        auto desc = BufferDesc(total);
-        Check(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc,
-            D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)));
+        ComPtr<ID3D12Resource> readback = AcquireReadback(total);
 
         if (resource->desc.SampleDesc.Count > 1)
         {

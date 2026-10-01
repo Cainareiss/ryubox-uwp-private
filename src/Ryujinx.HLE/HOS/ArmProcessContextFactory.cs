@@ -86,7 +86,20 @@ namespace Ryujinx.HLE.HOS
                 // We want to use host tracked mode if the host page size is > 4KB.
                 if ((mode == MemoryManagerMode.HostMapped || mode == MemoryManagerMode.HostMappedUnsafe) && MemoryBlock.GetPageSize() <= 0x1000)
                 {
-                    if (!AddressSpace.TryCreate(context.Memory, addressSpaceSize, out addressSpace))
+                    bool created;
+                    try
+                    {
+                        created = AddressSpace.TryCreate(context.Memory, addressSpaceSize, out addressSpace);
+                    }
+                    catch (Exception ex)
+                    {
+                        // Sandboxed hosts (Xbox UWP) can throw instead of returning false.
+                        Logger.Warning?.Print(LogClass.Cpu, $"Address space creation threw {ex.GetType().Name}: {ex.Message}");
+                        addressSpace = null;
+                        created = false;
+                    }
+
+                    if (!created)
                     {
                         Logger.Warning?.Print(LogClass.Cpu, "Address space creation failed, falling back to software page table");
 

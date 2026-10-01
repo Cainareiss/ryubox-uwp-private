@@ -66,6 +66,52 @@ namespace Ryujinx.HLE
 
         public DirtyHacks DirtyHacks { get; }
 
+        // Mirrorable DRAM (HostMapped modes) can fail on sandboxed hosts such as
+
+        // Xbox UWP (Win32 0x5AF while committing the paging-file section). Fall
+
+        // back to the private SoftwarePageTable block before the GPU/renderer is
+
+        // touched so the session can continue instead of failing at boot.
+
+        private static MemoryBlock CreateDram(HleConfiguration configuration)
+
+        {
+
+            ulong size = configuration.MemoryConfiguration.DramSize;
+
+            if (configuration.MemoryManagerMode != MemoryManagerMode.SoftwarePageTable)
+
+            {
+
+                try
+
+                {
+
+                    return new MemoryBlock(size, MemoryAllocationFlags.Reserve | MemoryAllocationFlags.Mirrorable);
+
+                }
+
+                catch (Exception ex)
+
+                {
+
+                    Ryujinx.Common.Logging.Logger.Warning?.Print(Ryujinx.Common.Logging.LogClass.Cpu,
+
+                        $"Mirrorable DRAM allocation failed ({ex.GetType().Name}: {ex.Message}); falling back to software page table");
+
+                    configuration.MemoryManagerMode = MemoryManagerMode.SoftwarePageTable;
+
+                }
+
+            }
+
+
+            return new MemoryBlock(size, MemoryAllocationFlags.Reserve);
+
+        }
+
+
         public Switch(HleConfiguration configuration)
         {
             ArgumentNullException.ThrowIfNull(configuration.GpuRenderer);
@@ -76,14 +122,12 @@ namespace Ryujinx.HLE
             FileSystem = Configuration.VirtualFileSystem;
             UIHandler = Configuration.HostUIHandler;
 
-            MemoryAllocationFlags memoryAllocationFlags = configuration.MemoryManagerMode == MemoryManagerMode.SoftwarePageTable
-                ? MemoryAllocationFlags.Reserve
-                : MemoryAllocationFlags.Reserve | MemoryAllocationFlags.Mirrorable;
+            MemoryBlock dram = CreateDram(configuration);
 
 #pragma warning disable IDE0055 // Disable formatting
             DirtyHacks        = new DirtyHacks(Configuration.Hacks);
             AudioDeviceDriver = new CompatLayerHardwareDeviceDriver(Configuration.AudioDeviceDriver);
-            Memory            = new MemoryBlock(Configuration.MemoryConfiguration.DramSize, memoryAllocationFlags);
+            Memory            = dram;
             Gpu               = new GpuContext(Configuration.GpuRenderer, DirtyHacks);
             Debugger          = Configuration.EnableGdbStub ? new Debugger.Debugger(this, Configuration.GdbStubPort) : null;
             System            = new HOS.Horizon(this);
