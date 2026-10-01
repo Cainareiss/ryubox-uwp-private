@@ -421,8 +421,14 @@ std::vector<std::shared_ptr<Resource>> BindProgram(const std::shared_ptr<Program
                     {
                         auto format=static_cast<DXGI_FORMAT>(found->format);
                         Require(!IsTypelessFormat(format));
-                        D3D12_FEATURE_DATA_FORMAT_SUPPORT support{format};
-                        Check(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &support, sizeof(support)));
+                        auto cachedSupport=formatSupport.find(format);
+                        if (cachedSupport==formatSupport.end())
+                        {
+                            D3D12_FEATURE_DATA_FORMAT_SUPPORT query{format};
+                            Check(device->CheckFeatureSupport(D3D12_FEATURE_FORMAT_SUPPORT, &query, sizeof(query)));
+                            cachedSupport=formatSupport.emplace(format,query).first;
+                        }
+                        const auto& support=cachedSupport->second;
                         Require((support.Support1 & D3D12_FORMAT_SUPPORT1_BUFFER) != 0);
                         if (b.type==D3D12_DESCRIPTOR_RANGE_TYPE_UAV)
                             Require((support.Support2 & D3D12_FORMAT_SUPPORT2_UAV_TYPED_STORE) != 0);
@@ -676,12 +682,15 @@ std::vector<std::shared_ptr<Resource>> BindProgram(const std::shared_ptr<Program
                 // Keep this opt-in desktop compatibility escape hatch scoped to
                 // the direct-host harness; a real renderer can retain the native
                 // mapping or provide shader-side swizzle emulation.
-                char disableComponentSwizzle[2]{};
-                bool useDefaultComponentMapping = GetEnvironmentVariableA(
-                    "RYUJINX_UWP_D3D12_DISABLE_COMPONENT_SWIZZLE",
-                    disableComponentSwizzle,
-                    static_cast<DWORD>(sizeof(disableComponentSwizzle))) != 0 &&
-                    disableComponentSwizzle[0] == '1';
+                static const bool useDefaultComponentMapping = []
+                {
+                    char disableComponentSwizzle[2]{};
+                    return GetEnvironmentVariableA(
+                        "RYUJINX_UWP_D3D12_DISABLE_COMPONENT_SWIZZLE",
+                        disableComponentSwizzle,
+                        static_cast<DWORD>(sizeof(disableComponentSwizzle))) != 0 &&
+                        disableComponentSwizzle[0] == '1';
+                }();
                 UINT mapping = b.componentMapping;
                 if (resource->desc.Dimension != D3D12_RESOURCE_DIMENSION_BUFFER && !mapping)
                 {
@@ -1613,9 +1622,19 @@ void DrawProgram(UINT64 id, const RyuboxD12Binding* bindings, UINT bindingCount,
             arguments[0].Constant={p->auxiliaryRoot,0,2};
         }
         arguments[argumentCount-1].Type=draw.indexResource ? D3D12_INDIRECT_ARGUMENT_TYPE_DRAW_INDEXED : D3D12_INDIRECT_ARGUMENT_TYPE_DRAW;
-        D3D12_COMMAND_SIGNATURE_DESC signatureDesc{stride,argumentCount,arguments,0};
-        ComPtr<ID3D12CommandSignature> signature; Check(device->CreateCommandSignature(&signatureDesc,
-            p->auxiliaryRoot!=UINT_MAX ? p->root.Get() : nullptr,IID_PPV_ARGS(&signature)));
+        // The layout depends only on stride, argument kind and this program's
+        // root signature. Creating a new signature per indirect draw is a
+        // driver object allocation on the hot path.
+        UINT64 signatureKey=(static_cast<UINT64>(stride)<<2)|(draw.indexResource ? 2u : 0u)|(argumentCount==2 ? 1u : 0u);
+        auto& signature=p->commandSignatures[signatureKey];
+        if (!signature)
+        {
+            D3D12_COMMAND_SIGNATURE_DESC signatureDesc{stride,argumentCount,arguments,0};
+            HRESULT signatureResult=device->CreateCommandSignature(&signatureDesc,
+                p->auxiliaryRoot!=UINT_MAX ? p->root.Get() : nullptr,IID_PPV_ARGS(&signature));
+            if (FAILED(signatureResult)) p->commandSignatures.erase(signatureKey);
+            Check(signatureResult);
+        }
         frames[frameIndex].signatures.push_back(signature);
         ReadTransition(args,D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
         std::shared_ptr<Resource> counter;

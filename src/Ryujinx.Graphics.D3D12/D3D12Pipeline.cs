@@ -36,7 +36,7 @@ public sealed unsafe class D3D12Pipeline : IPipeline
     private PolygonMode _polygonMode = PolygonMode.Fill;
     private PolygonModeMask _depthBiasModes;
     private float _depthBiasFactor;
-    private float _depthBiasUnits;
+    private int _depthBiasUnits;
     private float _depthBiasClamp;
     private float _renderScale = 1;
     private DepthMode _depthMode;
@@ -160,7 +160,7 @@ public sealed unsafe class D3D12Pipeline : IPipeline
     }
     private D3D12ProgramBinding[] Bindings(bool logDiag = false)
     {
-        var result = new List<D3D12ProgramBinding>();
+        var result = new List<D3D12ProgramBinding>(_program.BindingSlotCount);
         var diagLines = logDiag ? new System.Text.StringBuilder() : null;
         if (logDiag)
         {
@@ -948,10 +948,13 @@ public sealed unsafe class D3D12Pipeline : IPipeline
             throw new ArgumentOutOfRangeException(nameof(modes));
         if (!float.IsFinite(factor) || !float.IsFinite(units) || !float.IsFinite(clamp))
             throw new ArgumentOutOfRangeException(nameof(factor), "Depth bias values must be finite.");
-        _ = checked((int)units); // Validate before changing any of the stored state.
+        // D3D12 stores the constant bias as an integer number of depth units.
+        // Truncation would turn fractional guest offsets (GAL halves the
+        // Maxwell register) such as 0.5 into no bias at all.
+        int roundedUnits = checked((int)MathF.Round(units, MidpointRounding.AwayFromZero));
         _depthBiasModes = modes;
         _depthBiasFactor = factor;
-        _depthBiasUnits = units;
+        _depthBiasUnits = roundedUnits;
         _depthBiasClamp = clamp;
         UpdateDepthBias();
     }
@@ -966,7 +969,7 @@ public sealed unsafe class D3D12Pipeline : IPipeline
 
         if (_depthBiasModes.HasFlag(mask))
         {
-            _state.Rasterizer.DepthBias = checked((int)_depthBiasUnits);
+            _state.Rasterizer.DepthBias = _depthBiasUnits;
             _state.Rasterizer.DepthBiasClamp = _depthBiasClamp;
             _state.Rasterizer.SlopeBias = _depthBiasFactor;
         }

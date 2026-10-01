@@ -539,6 +539,7 @@ struct Program
     std::vector<std::pair<UINT, UINT>> tables; // stage, sampler/non-sampler
     std::vector<UINT> tableSizes;
     std::map<std::string, ComPtr<ID3D12PipelineState>> graphics;
+    std::unordered_map<UINT64, ComPtr<ID3D12CommandSignature>> commandSignatures;
 };
 
 struct Counter
@@ -624,6 +625,7 @@ public:
     bool defaultTargetBound = false;
     bool composition = false;
     bool logicOpSupported = false;
+    std::unordered_map<DXGI_FORMAT, D3D12_FEATURE_DATA_FORMAT_SUPPORT> formatSupport;
 
     struct MemoryBlock
     {

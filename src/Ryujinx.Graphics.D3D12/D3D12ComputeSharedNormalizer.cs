@@ -45,12 +45,6 @@ internal static partial class D3D12ComputeSharedNormalizer
             return source;
         }
 
-        // Do not invent an invocation index: some shaders have no such input.
-        // Only the SPIRV-Cross builtin with an actual GroupIndex input is safe.
-        if (!Regex.IsMatch(source, @"\bgl_LocalInvocationIndex\s*:\s*SV_GroupIndex\b") ||
-            !Regex.IsMatch(source, @"\bgl_LocalInvocationIndex\s*=\s*stage_input\.gl_LocalInvocationIndex\s*;"))
-            return source;
-
         HashSet<string> shared = new(StringComparer.Ordinal);
         foreach (Match declaration in SharedDeclarationRegex().Matches(source))
             shared.Add(declaration.Groups["name"].Value);
@@ -59,6 +53,13 @@ internal static partial class D3D12ComputeSharedNormalizer
         int main = source.IndexOf("void comp_main", StringComparison.Ordinal);
         if (main < 0) main = source.IndexOf("void main", StringComparison.Ordinal);
         int body = main < 0 ? -1 : source.IndexOf('{', main);
+
+        // Do not invent an invocation index: some shaders have no such input.
+        // The SV_GroupIndex builtin must be in scope inside the rewritten
+        // function, either copied from stage_input into the SPIRV-Cross
+        // static or declared directly as an entry-point parameter.
+        if (body < 0 || !HasInvocationIndex(source, source[main..body]))
+            return source;
         int barrier = body < 0 ? -1 : source.IndexOf("GroupMemoryBarrierWithGroupSync", body, StringComparison.Ordinal);
         if (body < 0 || barrier < 0) return source;
 
@@ -103,6 +104,17 @@ internal static partial class D3D12ComputeSharedNormalizer
         }
 
         return replacements == 0 ? source : prefix + rewritten + suffix;
+    }
+
+    private static bool HasInvocationIndex(string source, string signature)
+    {
+        const string GroupIndexInput = @"\bgl_LocalInvocationIndex\s*:\s*SV_GroupIndex\b";
+
+        if (Regex.IsMatch(signature, GroupIndexInput))
+            return true;
+
+        return Regex.IsMatch(source, GroupIndexInput) &&
+            Regex.IsMatch(source, @"\bgl_LocalInvocationIndex\s*=\s*stage_input\.gl_LocalInvocationIndex\s*;");
     }
 
     private static bool IsZeroInitializer(string value)

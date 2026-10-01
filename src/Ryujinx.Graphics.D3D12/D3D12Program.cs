@@ -129,6 +129,7 @@ public sealed class D3D12Program : D3D12Resource, IProgram
     private readonly byte[] _binary;
     private readonly D3D12BindingInfo[] _bindings;
     public ReadOnlySpan<D3D12BindingInfo> Bindings => _bindings;
+    internal int BindingSlotCount { get; }
     internal D3D12VertexInput[] VertexInputs { get; }
     // Set only by the GAL renderer entry points. The GPU translator specializes
     // alpha test into these shaders; raw device HLSL has no such guarantee.
@@ -139,6 +140,7 @@ public sealed class D3D12Program : D3D12Resource, IProgram
         : base(device, id)
     {
         _bindings = bindings;
+        foreach (var binding in bindings) BindingSlotCount += checked((int)binding.Count);
         VertexInputs = inputs;
         HasStreamOutput = sources.Any(s => s.StreamOutput?.Length > 0);
         HasHullShader = sources.Any(s => s.Stage == ShaderStage.TessellationControl);
