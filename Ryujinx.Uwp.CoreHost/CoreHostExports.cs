@@ -883,14 +883,23 @@ namespace Ryujinx.Uwp.CoreHost
                             ? "Deep trace enabled: correlated clock, guest dispatch/SVC, kernel thread, compositor, GPU and memory samples"
                             : "Deep trace disabled: normal guest logging retained without per-dispatch instrumentation");
 
+                    bool marioWonderTvProfile = IsMarioWonderPath(game);
+                    CoreHostLog.Write(
+                        "settings",
+                        marioWonderTvProfile
+                            ? "Per-game profile applied: Super Mario Bros. Wonder; mode=TV (docked)"
+                            : "Per-game profile applied: default; mode=Handheld");
+
                     HleConfiguration configuration = new HleConfiguration(
                         memoryConfiguration,
                         ToSystemLanguage(_activeSettings.Language),
                         ToRegionCode(_activeSettings.Region),
                         _activeSettings.VSync ? VSyncMode.Switch : VSyncMode.Unbounded,
-                        // Always emulate the handheld profile. It avoids
-                        // docked clocks and keeps the Xbox memory budget lower.
-                        false,
+                        // Keep the low-memory handheld default, except for
+                        // Super Mario Bros. Wonder where the requested TV
+                        // profile is title-specific. Do not let a global UI
+                        // setting silently override other games.
+                        marioWonderTvProfile,
                         // PTC remains opt-in on NativeAOT/UWP. The default is
                         // safe JIT; setting RYUJINX_UWP_ENABLE_PTC=1 enables a
                         // diagnostic build/session after the first-frame path
@@ -3733,6 +3742,17 @@ namespace Ryujinx.Uwp.CoreHost
                    (gamePath.IndexOf("pokemon", StringComparison.OrdinalIgnoreCase) >= 0 &&
                     gamePath.IndexOf("pikachu", StringComparison.OrdinalIgnoreCase) >= 0 &&
                     gamePath.IndexOf("let", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private static bool IsMarioWonderPath(string gamePath)
+        {
+            if (string.IsNullOrWhiteSpace(gamePath))
+            {
+                return false;
+            }
+
+            return gamePath.IndexOf("010015100B514000", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                   gamePath.IndexOf("Super Mario Bros. Wonder", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private static bool IsRivalsOfAetherPath(string gamePath)

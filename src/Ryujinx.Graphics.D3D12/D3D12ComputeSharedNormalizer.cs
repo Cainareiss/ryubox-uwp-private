@@ -45,6 +45,12 @@ internal static partial class D3D12ComputeSharedNormalizer
             return source;
         }
 
+        // Do not invent an invocation index: some shaders have no such input.
+        // Only the SPIRV-Cross builtin with an actual GroupIndex input is safe.
+        if (!Regex.IsMatch(source, @"\bgl_LocalInvocationIndex\s*:\s*SV_GroupIndex\b") ||
+            !Regex.IsMatch(source, @"\bgl_LocalInvocationIndex\s*=\s*stage_input\.gl_LocalInvocationIndex\s*;"))
+            return source;
+
         HashSet<string> shared = new(StringComparer.Ordinal);
         foreach (Match declaration in SharedDeclarationRegex().Matches(source))
             shared.Add(declaration.Groups["name"].Value);

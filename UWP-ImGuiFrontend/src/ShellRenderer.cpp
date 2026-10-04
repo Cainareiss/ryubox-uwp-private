@@ -1,4 +1,5 @@
 #include "UwpImGuiFrontend/ShellRenderer.h"
+#include "UwpImGuiFrontend/ShelfMath.h"
 #include "UwpImGuiFrontend/Text.h"
 #include "UwpImGuiFrontend/Views.h"
 #include "UwpImGuiFrontend/Widgets.h"
@@ -832,6 +833,375 @@ public:
 			DrawCarouselPosition(draw, context, frontend, theme);
 	}
 
+	void DrawMinimalistShelf(ImDrawList* draw, const ShellLayoutContext& context,
+		Frontend& frontend, const ShellPresentation& presentation, const ShellTheme& theme,
+		float deltaSeconds)
+	{
+		const auto& catalogue = frontend.Catalogue();
+		const MinimalistShelfConfiguration& shelfConfig = frontend.Configuration().minimalistShelf;
+		if (catalogue.empty())
+		{
+			const UnitRect card = CarouselCenterRect(context, frontend.Configuration().premiumCarousel);
+			DrawShellPanelPx(draw, RectMinPx(context, card), RectMaxPx(context, card), theme,
+				18.0f * context.uiScale, 0.94f);
+			TextureHandle placeholder = Texture(frontend.Configuration().placeholderArtwork, true);
+			if (placeholder)
+				DrawTextureContained(draw, context, placeholder, card.Shrunk(22.0f), 14.0f, 0.42f);
+			const std::string add = frontend.Configuration().emptyCatalogueLabel;
+			const ImVec2 textSize = TextSizeUnits(context, 18.0f, add);
+			DrawText(draw, context, 18.0f,
+				{ card.x + (card.w - textSize.x) * 0.5f, card.bottom() + 18.0f },
+				Color(theme.textSecondary), add);
+			DrawTitlePill(draw, context, frontend, theme, deltaSeconds);
+			return;
+		}
+
+		m_shelfTime += deltaSeconds;
+		const float selected = static_cast<float>(frontend.State().SelectedIndex());
+		if (!m_shelfInitialized)
+		{
+			m_shelfSpring.position = selected;
+			m_shelfSpring.velocity = 0.0f;
+			m_shelfInitialized = true;
+			m_lastSelectedGame = frontend.State().SelectedIndex();
+			m_selectTime = m_shelfTime;
+		}
+
+		if (frontend.State().SelectedIndex() != m_lastSelectedGame)
+		{
+			m_lastSelectedGame = frontend.State().SelectedIndex();
+			m_selectTime = m_shelfTime;
+		}
+
+		// Smoothly adapt dominant glow towards theme cursor accent
+		const ImVec4 targetGlow = theme.cursorNormal;
+		m_dominantGlow.x += (targetGlow.x - m_dominantGlow.x) * std::min(1.0f, deltaSeconds * 4.0f);
+		m_dominantGlow.y += (targetGlow.y - m_dominantGlow.y) * std::min(1.0f, deltaSeconds * 4.0f);
+		m_dominantGlow.z += (targetGlow.z - m_dominantGlow.z) * std::min(1.0f, deltaSeconds * 4.0f);
+		m_dominantGlow.w += (targetGlow.w - m_dominantGlow.w) * std::min(1.0f, deltaSeconds * 4.0f);
+
+		m_shelfSpring.stiffness = shelfConfig.springStiffness;
+		m_shelfSpring.Update(selected, deltaSeconds);
+		const float visualIndex = m_shelfSpring.position;
+
+		using namespace ShelfLayoutConstants;
+		const float screenW = context.viewportPx.x;
+		const float screenH = context.viewportPx.y;
+		const float aspect = screenW / std::max(1.0f, screenH);
+
+		// 3D Perspective and Camera Setup
+		const Mat4 proj = Mat4::Perspective(Radians(kFovY), aspect, 0.1f, 60.0f);
+		const Mat4 view = Mat4::LookAt(kEye, kTarget, Vec3(0, 1, 0));
+		const Mat4 viewProj = proj * view;
+
+		// 1. Ambient Volumetric Glow behind the selected case
+		if (shelfConfig.dynamicGlow)
+		{
+			const ImVec2 glowCenter = ProjectToScreen(viewProj, Vec3(0.0f, 0.15f, kCenterZ - 0.75f), screenW, screenH);
+			const float glowRadius = 420.0f * context.uiScale;
+			const ImU32 glowColOuter = IM_COL32(
+				static_cast<int>(m_dominantGlow.x * 255.0f),
+				static_cast<int>(m_dominantGlow.y * 255.0f),
+				static_cast<int>(m_dominantGlow.z * 255.0f),
+				38
+			);
+			const ImU32 glowColInner = IM_COL32(
+				static_cast<int>(m_dominantGlow.x * 255.0f),
+				static_cast<int>(m_dominantGlow.y * 255.0f),
+				static_cast<int>(m_dominantGlow.z * 255.0f),
+				85
+			);
+			draw->AddCircleFilled(glowCenter, glowRadius, glowColOuter, 64);
+			draw->AddCircleFilled(glowCenter, glowRadius * 0.55f, glowColInner, 48);
+		}
+
+		// 2. Identify and sort visible cases (farthest first so central ones draw on top)
+		std::vector<std::size_t> visible;
+		const int centerIndex = static_cast<int>(std::floor(visualIndex));
+		for (int candidate = centerIndex - kVisibleRadius; candidate <= centerIndex + kVisibleRadius; ++candidate)
+		{
+			if (candidate < 0 || candidate >= static_cast<int>(catalogue.size()))
+				continue;
+			visible.push_back(static_cast<std::size_t>(candidate));
+		}
+		std::sort(visible.begin(), visible.end(), [visualIndex](std::size_t a, std::size_t b) {
+			return std::abs(static_cast<float>(a) - visualIndex) >
+				std::abs(static_cast<float>(b) - visualIndex);
+		});
+
+		// 3. Render 3D cases
+		const float sinceSelect = m_shelfTime - m_selectTime;
+		for (const std::size_t index : visible)
+		{
+			const float d = static_cast<float>(index) - visualIndex;
+			const float ad = std::fabs(d);
+			const float s = (d < 0.0f) ? -1.0f : 1.0f;
+			const float e = Smoothstep(0.0f, 1.0f, std::min(ad, 1.0f));
+			const float farNeighbour = std::max(ad - 1.0f, 0.0f);
+
+			// Positions in world space
+			const float sideX = kSideX + farNeighbour * kStepX;
+			const float sideZ = kSideZ - farNeighbour * kStepZ;
+			const float sway = shelfConfig.bobbingAndSway ? (1.0f - e) * 0.08f * std::sin(m_shelfTime * 0.7f) : 0.0f;
+			const float bob = shelfConfig.bobbingAndSway ? (1.0f - e) * (0.030f + 0.012f * (1.0f + std::sin(m_shelfTime * 1.3f))) : 0.0f;
+
+			const float x = s * Mix(0.0f, sideX, e);
+			float z = Mix(kCenterZ, sideZ, e);
+			const float turn = Mix(sway, -s * Radians(kSideTurn), e);
+
+			// Launch animation push forward along Z
+			if (m_launch.active && index == frontend.State().SelectedIndex())
+			{
+				const float launchProgress = Smoothstep(0.0f, 0.6f, m_launch.timer);
+				z += launchProgress * 2.2f;
+			}
+
+			const Mat4 model = Mat4::Translate(x, bob, z) * Mat4::RotateY(turn);
+
+			// Case local vertices for the front face
+			const Vec4 localTL(-kBoxHalfW, kBoxHalfH, kBoxHalfD, 1.0f);
+			const Vec4 localTR(kBoxHalfW, kBoxHalfH, kBoxHalfD, 1.0f);
+			const Vec4 localBR(kBoxHalfW, -kBoxHalfH, kBoxHalfD, 1.0f);
+			const Vec4 localBL(-kBoxHalfW, -kBoxHalfH, kBoxHalfD, 1.0f);
+
+			// Project front vertices to 3D world, then to screen pixels
+			const Vec4 wTL = model * localTL;
+			const Vec4 wTR = model * localTR;
+			const Vec4 wBR = model * localBR;
+			const Vec4 wBL = model * localBL;
+
+			const ImVec2 tl = ProjectToScreen(viewProj, Vec3(wTL.x, wTL.y, wTL.z), screenW, screenH);
+			const ImVec2 tr = ProjectToScreen(viewProj, Vec3(wTR.x, wTR.y, wTR.z), screenW, screenH);
+			const ImVec2 br = ProjectToScreen(viewProj, Vec3(wBR.x, wBR.y, wBR.z), screenW, screenH);
+			const ImVec2 bl = ProjectToScreen(viewProj, Vec3(wBL.x, wBL.y, wBL.z), screenW, screenH);
+
+			// Brightness / lighting falloff for depth cue
+			const float brightness = Clamp(Mix(1.0f, 0.72f, e) - 0.045f * std::min(farNeighbour, 5.0f), 0.35f, 1.0f);
+			const int colVal = static_cast<int>(brightness * 255.0f);
+			const ImU32 coverTint = IM_COL32(colVal, colVal, colVal, 255);
+
+			TextureHandle artwork = PreferredArtwork(catalogue[index], presentation);
+			if (!artwork)
+				artwork = Texture(frontend.Configuration().placeholderArtwork, true);
+
+			// 3a. Floor Shadow
+			const float shadowAlpha = Clamp((1.0f - e * 0.45f) * 110.0f, 20.0f, 110.0f);
+			const Vec4 shadowL = model * Vec4(-kBoxHalfW * 1.08f, -kBoxHalfH, 0.0f, 1.0f);
+			const Vec4 shadowR = model * Vec4(kBoxHalfW * 1.08f, -kBoxHalfH, 0.0f, 1.0f);
+			const Vec4 shadowF = model * Vec4(0.0f, -kBoxHalfH, kBoxHalfD * 2.2f, 1.0f);
+			const Vec4 shadowB = model * Vec4(0.0f, -kBoxHalfH, -kBoxHalfD * 2.2f, 1.0f);
+			const ImVec2 stl = ProjectToScreen(viewProj, Vec3(shadowL.x, kFloorY - 0.01f, shadowB.z), screenW, screenH);
+			const ImVec2 str = ProjectToScreen(viewProj, Vec3(shadowR.x, kFloorY - 0.01f, shadowB.z), screenW, screenH);
+			const ImVec2 sbr = ProjectToScreen(viewProj, Vec3(shadowR.x, kFloorY - 0.01f, shadowF.z), screenW, screenH);
+			const ImVec2 sbl = ProjectToScreen(viewProj, Vec3(shadowL.x, kFloorY - 0.01f, shadowF.z), screenW, screenH);
+			draw->AddQuadFilled(stl, str, sbr, sbl, IM_COL32(0, 0, 0, static_cast<int>(shadowAlpha)));
+
+			// 3b. Floor Reflection
+			if (shelfConfig.reflections && ad <= 3.2f && artwork)
+			{
+				const Mat4 modelRefl = Mat4::Translate(0.0f, 2.0f * kFloorY, 0.0f) * Mat4::Scale(1.0f, -1.0f, 1.0f) * model;
+				const Vec4 rTL = modelRefl * localTL;
+				const Vec4 rTR = modelRefl * localTR;
+				const Vec4 rBR = modelRefl * localBR;
+				const Vec4 rBL = modelRefl * localBL;
+				const ImVec2 rtl = ProjectToScreen(viewProj, Vec3(rTL.x, rTL.y, rTL.z), screenW, screenH);
+				const ImVec2 rtr = ProjectToScreen(viewProj, Vec3(rTR.x, rTR.y, rTR.z), screenW, screenH);
+				const ImVec2 rbr = ProjectToScreen(viewProj, Vec3(rBR.x, rBR.y, rBR.z), screenW, screenH);
+				const ImVec2 rbl = ProjectToScreen(viewProj, Vec3(rBL.x, rBL.y, rBL.z), screenW, screenH);
+
+				const float reflAlpha = Clamp(shelfConfig.reflectionStrength * (1.0f - e * 0.65f) * brightness * 255.0f, 0.0f, 255.0f);
+				const ImU32 reflTint = IM_COL32(colVal, colVal, colVal, static_cast<int>(reflAlpha));
+				draw->AddImageQuad(TextureReference(artwork.id), rtl, rtr, rbr, rbl,
+					ImVec2(0.0f, 1.0f), ImVec2(1.0f, 1.0f), ImVec2(1.0f, 0.0f), ImVec2(0.0f, 0.0f), reflTint);
+			}
+
+			// 3c. 3D Spine & Case Casing Depth
+			if (d > 0.02f)
+			{
+				// Left spine is visible when turned toward center
+				const Vec4 spBackTL = model * Vec4(-kBoxHalfW, kBoxHalfH, -kBoxHalfD, 1.0f);
+				const Vec4 spBackBL = model * Vec4(-kBoxHalfW, -kBoxHalfH, -kBoxHalfD, 1.0f);
+				const ImVec2 stlSp = ProjectToScreen(viewProj, Vec3(spBackTL.x, spBackTL.y, spBackTL.z), screenW, screenH);
+				const ImVec2 sblSp = ProjectToScreen(viewProj, Vec3(spBackBL.x, spBackBL.y, spBackBL.z), screenW, screenH);
+
+				const int spineTone = static_cast<int>(brightness * 0.65f * 255.0f);
+				draw->AddQuadFilled(stlSp, tl, bl, sblSp, IM_COL32(spineTone, spineTone, spineTone + 10, 255));
+				ImVec2 spinePts[4] = { stlSp, tl, bl, sblSp };
+				draw->AddPolyline(spinePts, 4, IM_COL32(30, 32, 44, 200), ImDrawFlags_Closed, 1.0f);
+			}
+			else if (d < -0.02f)
+			{
+				// Right edge is visible
+				const Vec4 spBackTR = model * Vec4(kBoxHalfW, kBoxHalfH, -kBoxHalfD, 1.0f);
+				const Vec4 spBackBR = model * Vec4(kBoxHalfW, -kBoxHalfH, -kBoxHalfD, 1.0f);
+				const ImVec2 strSp = ProjectToScreen(viewProj, Vec3(spBackTR.x, spBackTR.y, spBackTR.z), screenW, screenH);
+				const ImVec2 sbrSp = ProjectToScreen(viewProj, Vec3(spBackBR.x, spBackBR.y, spBackBR.z), screenW, screenH);
+
+				const int spineTone = static_cast<int>(brightness * 0.65f * 255.0f);
+				draw->AddQuadFilled(tr, strSp, sbrSp, br, IM_COL32(spineTone, spineTone, spineTone + 10, 255));
+				ImVec2 edgePts[4] = { tr, strSp, sbrSp, br };
+				draw->AddPolyline(edgePts, 4, IM_COL32(30, 32, 44, 200), ImDrawFlags_Closed, 1.0f);
+			}
+
+			// 3d. Front Cover Face
+			if (artwork)
+			{
+				draw->AddImageQuad(TextureReference(artwork.id), tl, tr, br, bl,
+					ImVec2(0.0f, 0.0f), ImVec2(1.0f, 0.0f), ImVec2(1.0f, 1.0f), ImVec2(0.0f, 1.0f), coverTint);
+			}
+			else
+			{
+				draw->AddQuadFilled(tl, tr, br, bl, IM_COL32(24, 28, 40, 255));
+			}
+
+			// Front Face Subtle Border
+			ImVec2 coverPts[4] = { tl, tr, br, bl };
+			const bool isSelected = (index == frontend.State().SelectedIndex());
+			draw->AddPolyline(coverPts, 4,
+				isSelected ? IM_COL32(255, 255, 255, 220) : IM_COL32(80, 85, 110, 120),
+				ImDrawFlags_Closed, (isSelected ? 2.0f : 1.0f) * context.uiScale);
+
+			// 3e. Specular Sheen Animation (passes over cover when settling)
+			if (shelfConfig.specularSheen && isSelected && sinceSelect < 1.2f)
+			{
+				const float sheenT = sinceSelect / 1.2f;
+				const float sheenPos = -0.2f + sheenT * 1.4f;
+				const float sheenAlpha = (1.0f - Smoothstep(0.5f, 1.0f, sheenT)) * 0.35f;
+
+				// Interpolate diagonal line points across quad
+				const ImVec2 pTop = ImVec2(tl.x + (tr.x - tl.x) * Clamp(sheenPos + 0.15f, 0.0f, 1.0f),
+					tl.y + (tr.y - tl.y) * Clamp(sheenPos + 0.15f, 0.0f, 1.0f));
+				const ImVec2 pBot = ImVec2(bl.x + (br.x - bl.x) * Clamp(sheenPos - 0.15f, 0.0f, 1.0f),
+					bl.y + (br.y - bl.y) * Clamp(sheenPos - 0.15f, 0.0f, 1.0f));
+				draw->AddLine(pTop, pBot, IM_COL32(255, 255, 255, static_cast<int>(sheenAlpha * 255.0f)), 14.0f * context.uiScale);
+			}
+
+			// 3f. Neon Outline Halo when selected
+			if (isSelected && ad < 0.15f)
+			{
+				const float settle = 1.0f - Clamp(ad * 6.0f, 0.0f, 1.0f);
+				const float pulse = settle * (0.60f + 0.15f * std::sin(m_shelfTime * 2.5f));
+				const ImU32 haloGlow = IM_COL32(
+					static_cast<int>(m_dominantGlow.x * 255.0f),
+					static_cast<int>(m_dominantGlow.y * 255.0f),
+					static_cast<int>(m_dominantGlow.z * 255.0f),
+					static_cast<int>(pulse * 180.0f)
+				);
+				const ImU32 haloCore = IM_COL32(255, 255, 255, static_cast<int>(pulse * 240.0f));
+				draw->AddPolyline(coverPts, 4, haloGlow, ImDrawFlags_Closed, 7.0f * context.uiScale);
+				draw->AddPolyline(coverPts, 4, haloCore, ImDrawFlags_Closed, 2.0f * context.uiScale);
+			}
+
+			// Mouse click selection
+			const ImVec2 mouse = ImGui::GetIO().MousePos;
+			const float minX = std::min({ tl.x, tr.x, br.x, bl.x });
+			const float maxX = std::max({ tl.x, tr.x, br.x, bl.x });
+			const float minY = std::min({ tl.y, tr.y, br.y, bl.y });
+			const float maxY = std::max({ tl.y, tr.y, br.y, bl.y });
+			const bool hovered = !IsWidgetInputCaptured() &&
+				mouse.x >= minX && mouse.x <= maxX && mouse.y >= minY && mouse.y <= maxY;
+			if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+			{
+				if (index == frontend.State().SelectedIndex())
+					frontend.ActivateSelection();
+				else
+					frontend.Select(index);
+			}
+		}
+
+		// 4. Hero Metadata Section (Title + Badges in clean PS5 style)
+		const std::size_t selectedIdx = frontend.State().SelectedIndex();
+		if (selectedIdx < catalogue.size())
+		{
+			const LibraryItem& item = catalogue[selectedIdx];
+
+			// Center Title below the shelf
+			const float titleY = screenH * 0.810f;
+			const float maxTitleW = screenW * 0.75f;
+			float titlePt = 28.0f;
+			ImVec2 titleSize = TextSizeUnits(context, titlePt, item.name);
+			if (titleSize.x * context.uiScale > maxTitleW)
+			{
+				titlePt = std::max(18.0f, titlePt * (maxTitleW / (titleSize.x * context.uiScale)));
+				titleSize = TextSizeUnits(context, titlePt, item.name);
+			}
+			const ImVec2 titlePos = {
+				(screenW - titleSize.x * context.uiScale) * 0.5f,
+				titleY
+			};
+			draw->AddText(ImGui::GetFont(), titlePt * context.uiScale, titlePos,
+				IM_COL32(255, 255, 255, 255), item.name.data(), item.name.data() + item.name.size());
+
+			// Centered Badges and Details Row
+			const float metaY = titleY + titleSize.y * context.uiScale + 14.0f * context.uiScale;
+			std::string details;
+			if (!item.platform.empty())
+				details += item.platform;
+			if (item.contentId != 0)
+			{
+				if (!details.empty()) details += "   \xC2\xB7   ";
+				char hexBuf[32];
+				std::snprintf(hexBuf, sizeof(hexBuf), "%016llX", static_cast<unsigned long long>(item.contentId));
+				details += hexBuf;
+			}
+			if (!item.format.empty())
+			{
+				if (!details.empty()) details += "   \xC2\xB7   ";
+				details += item.format;
+			}
+
+			const float metaPt = 14.0f;
+			const ImVec2 detailsSize = TextSizeUnits(context, metaPt, details);
+			float totalRowW = detailsSize.x * context.uiScale;
+
+			// Badges: Favorite, Mods, Update
+			const float badgePt = 12.0f;
+			const float badgePadH = 8.0f * context.uiScale;
+			const float badgeGap = 10.0f * context.uiScale;
+			float favW = 0.0f, modsW = 0.0f, updW = 0.0f;
+			if (item.favorite)
+				favW = TextSizeUnits(context, badgePt, "FAV").x * context.uiScale + badgePadH * 2.0f;
+			if (item.modsActive)
+				modsW = TextSizeUnits(context, badgePt, "MODS").x * context.uiScale + badgePadH * 2.0f;
+			if (item.updateActive)
+				updW = TextSizeUnits(context, badgePt, "UPD").x * context.uiScale + badgePadH * 2.0f;
+
+			if (favW > 0.0f) totalRowW += badgeGap + favW;
+			if (modsW > 0.0f) totalRowW += badgeGap + modsW;
+			if (updW > 0.0f) totalRowW += badgeGap + updW;
+
+			float curX = (screenW - totalRowW) * 0.5f;
+			if (!details.empty())
+			{
+				draw->AddText(ImGui::GetFont(), metaPt * context.uiScale, ImVec2(curX, metaY),
+					ColorWithAlpha(theme.textSecondary, 0.85f), details.data(), details.data() + details.size());
+				curX += detailsSize.x * context.uiScale;
+			}
+
+			auto drawBadge = [&](const char* label, float width, ImU32 bgCol, ImU32 textCol) {
+				curX += badgeGap;
+				const ImVec2 bMin = { curX, metaY - 2.0f * context.uiScale };
+				const ImVec2 bMax = { curX + width, metaY + 18.0f * context.uiScale };
+				draw->AddRectFilled(bMin, bMax, bgCol, 9.0f * context.uiScale);
+				ImVec4 borderV4 = ImGui::ColorConvertU32ToFloat4(textCol);
+				borderV4.w *= 0.40f;
+				draw->AddRect(bMin, bMax, ImGui::ColorConvertFloat4ToU32(borderV4), 9.0f * context.uiScale, 0, 1.0f);
+				const ImVec2 lSize = TextSizeUnits(context, badgePt, label);
+				const ImVec2 lPos = { curX + (width - lSize.x * context.uiScale) * 0.5f, metaY + 1.0f * context.uiScale };
+				const std::string_view sv(label);
+				draw->AddText(ImGui::GetFont(), badgePt * context.uiScale, lPos, textCol, sv.data(), sv.data() + sv.size());
+				curX += width;
+			};
+
+			if (item.favorite)
+				drawBadge("FAV", favW, IM_COL32(255, 200, 40, 40), IM_COL32(255, 220, 80, 255));
+			if (item.modsActive)
+				drawBadge("MODS", modsW, IM_COL32(170, 70, 255, 40), IM_COL32(210, 140, 255, 255));
+			if (item.updateActive)
+				drawBadge("UPD", updW, IM_COL32(40, 220, 120, 40), IM_COL32(80, 255, 160, 255));
+		}
+	}
+
 	void BeginPendingLaunch(const ShellLayoutContext& context, Frontend& frontend,
 		const ShellPresentation& presentation)
 	{
@@ -854,7 +1224,7 @@ public:
 		m_launch.active = true;
 		m_launch.committed = false;
 		m_launch.timer = 0.0f;
-		m_launch.from = frontend.Configuration().catalogueLayout == CatalogueLayoutMode::PremiumCarousel3D ?
+		m_launch.from = IsCarouselOrShelfLayout(frontend.Configuration().catalogueLayout) ?
 			CarouselCenterRect(context, frontend.Configuration().premiumCarousel) :
 			GridRect(context, index % frontend.State().ItemsPerPage());
 		m_launch.texture = PreferredArtwork(*found, presentation);
@@ -1132,6 +1502,8 @@ public:
 			break;
 		case ShellFocusArea::Catalogue:
 		default:
+			if (frontend.Configuration().catalogueLayout == CatalogueLayoutMode::MinimalistShelfPS5)
+				return;
 			target = frontend.Configuration().catalogueLayout == CatalogueLayoutMode::PremiumCarousel3D ?
 				CarouselCenterRect(context, frontend.Configuration().premiumCarousel) :
 				GridRect(context, frontend.State().SelectedIndex() % frontend.State().ItemsPerPage());
@@ -1170,7 +1542,9 @@ public:
 		DrawTopHud(draw, context, frontend.Configuration(), presentation, theme);
 		DrawRail(draw, context, frontend, theme, true);
 		DrawRail(draw, context, frontend, theme, false);
-		if (frontend.Configuration().catalogueLayout == CatalogueLayoutMode::PremiumCarousel3D)
+		if (frontend.Configuration().catalogueLayout == CatalogueLayoutMode::MinimalistShelfPS5)
+			DrawMinimalistShelf(draw, context, frontend, presentation, theme, dt);
+		else if (frontend.Configuration().catalogueLayout == CatalogueLayoutMode::PremiumCarousel3D)
 			DrawPremiumCarousel(draw, context, frontend, presentation, theme, dt);
 		else
 			DrawCatalogue(draw, context, frontend, presentation, theme, dt);
@@ -1229,6 +1603,12 @@ private:
 	TitleOptionsState m_titleOptions;
 	float m_carouselVisualIndex = 0.0f;
 	bool m_carouselInitialized = false;
+	CriticallyDampedSpring m_shelfSpring;
+	bool m_shelfInitialized = false;
+	float m_shelfTime = 0.0f;
+	float m_selectTime = -10.0f;
+	std::size_t m_lastSelectedGame = static_cast<std::size_t>(-1);
+	ImVec4 m_dominantGlow = ImVec4(0.55f, 0.42f, 1.0f, 1.0f);
 	std::size_t m_lastPage = static_cast<std::size_t>(-1);
 	float m_pageAppearTime = 0.0f;
 	std::string m_title;

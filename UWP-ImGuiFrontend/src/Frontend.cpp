@@ -152,13 +152,13 @@ void Frontend::HandleInput(const FrameInput& input)
 		OpenContextMenu();
 	if (!m_catalogue.empty() && pressed(input.leftShoulder, m_previousInput.leftShoulder))
 	{
-		const std::size_t jump = m_configuration.catalogueLayout == CatalogueLayoutMode::PremiumCarousel3D ?
+		const std::size_t jump = IsCarouselOrShelfLayout(m_configuration.catalogueLayout) ?
 			5u : m_shell.ItemsPerPage();
 		Select(m_shell.SelectedIndex() - std::min(m_shell.SelectedIndex(), jump));
 	}
 	if (!m_catalogue.empty() && pressed(input.rightShoulder, m_previousInput.rightShoulder))
 	{
-		const std::size_t jump = m_configuration.catalogueLayout == CatalogueLayoutMode::PremiumCarousel3D ?
+		const std::size_t jump = IsCarouselOrShelfLayout(m_configuration.catalogueLayout) ?
 			5u : m_shell.ItemsPerPage();
 		Select(std::min(m_shell.SelectedIndex() + jump, m_catalogue.size() - 1));
 	}
@@ -238,10 +238,10 @@ void Frontend::Move(Direction direction)
 		break;
 	}
 
-	// The Premium carousel is deliberately linear. Left/right always move one title;
+	// The Premium carousel and Minimalist shelf are deliberately linear. Left/right always move one title;
 	// reaching either edge hands focus to the corresponding navigation rail. This is
 	// what makes the carousel feel like a console UI rather than a paged 5x3 grid.
-	if (m_configuration.catalogueLayout == CatalogueLayoutMode::PremiumCarousel3D)
+	if (IsCarouselOrShelfLayout(m_configuration.catalogueLayout))
 	{
 		if (direction == Direction::Left)
 		{

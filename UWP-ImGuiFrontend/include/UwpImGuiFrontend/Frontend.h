@@ -33,8 +33,24 @@ struct ActionHint
 
 enum class CatalogueLayoutMode : std::uint8_t
 {
+	MinimalistShelfPS5,
 	PremiumCarousel3D,
 	Grid,
+};
+
+[[nodiscard]] constexpr bool IsCarouselOrShelfLayout(CatalogueLayoutMode mode) noexcept
+{
+	return mode == CatalogueLayoutMode::MinimalistShelfPS5 || mode == CatalogueLayoutMode::PremiumCarousel3D;
+}
+
+struct MinimalistShelfConfiguration
+{
+	bool reflections = true;
+	bool dynamicGlow = true;
+	bool bobbingAndSway = true;
+	bool specularSheen = true;
+	float reflectionStrength = 0.28f;
+	float springStiffness = 150.0f;
 };
 
 struct PremiumCarouselConfiguration
@@ -69,8 +85,9 @@ struct FrontendConfiguration
 	std::vector<ShellAction> leftRail;
 	std::vector<ShellAction> rightRail;
 	std::vector<ActionHint> actionHints;
-	CatalogueLayoutMode catalogueLayout = CatalogueLayoutMode::PremiumCarousel3D;
+	CatalogueLayoutMode catalogueLayout = CatalogueLayoutMode::MinimalistShelfPS5;
 	PremiumCarouselConfiguration premiumCarousel{};
+	MinimalistShelfConfiguration minimalistShelf{};
 	bool animateLaunches = true;
 };
 

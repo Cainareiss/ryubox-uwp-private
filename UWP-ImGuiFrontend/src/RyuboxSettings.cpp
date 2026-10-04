@@ -630,8 +630,12 @@ bool ApplyRyuboxFrontendInterfaceSetting(Frontend& frontend,
 {
 	if (id == "interface.catalogueLayout")
 	{
-		frontend.SetCatalogueLayout(settings.catalogueLayout.selected == 0 ?
-			CatalogueLayoutMode::PremiumCarousel3D : CatalogueLayoutMode::Grid);
+		CatalogueLayoutMode mode = CatalogueLayoutMode::MinimalistShelfPS5;
+		if (settings.catalogueLayout.selected == 1)
+			mode = CatalogueLayoutMode::PremiumCarousel3D;
+		else if (settings.catalogueLayout.selected == 2)
+			mode = CatalogueLayoutMode::Grid;
+		frontend.SetCatalogueLayout(mode);
 		return true;
 	}
 	if (id == "interface.carouselReflections")
@@ -662,7 +666,8 @@ void SyncRyuboxFrontendInterfaceSettings(const Frontend& frontend,
 {
 	const FrontendConfiguration& configuration = frontend.Configuration();
 	settings.catalogueLayout.selected =
-		configuration.catalogueLayout == CatalogueLayoutMode::PremiumCarousel3D ? 0u : 1u;
+		configuration.catalogueLayout == CatalogueLayoutMode::MinimalistShelfPS5 ? 0u :
+		(configuration.catalogueLayout == CatalogueLayoutMode::PremiumCarousel3D ? 1u : 2u);
 	settings.carouselReflections.value = configuration.premiumCarousel.reflections;
 	settings.carouselGlow.value = configuration.premiumCarousel.selectedGlow;
 	settings.carouselDepth.value = configuration.premiumCarousel.depthStrength;
@@ -794,7 +799,7 @@ RyuboxSettingsModel MakeDefaultRyuboxSettingsModel()
 	model.logs.presentationLogs = { "Presentation logs", false, true, true };
 	model.logs.syncStalls = { "Sync stall logs", false, true, true };
 
-	model.interface.catalogueLayout = { "Biblioteca", choices({ "Carrossel Premium 3D", "Grade classica" }), 0, true, true };
+	model.interface.catalogueLayout = { "Biblioteca", choices({ "Roleta Minimalista (PS5)", "Carrossel Premium 3D", "Grade classica" }), 0, true, true };
 	model.interface.carouselReflections = { "Reflexo das capas", true, true, true };
 	model.interface.carouselGlow = { "Glow da capa selecionada", true, true, true };
 	model.interface.carouselDepth = { "Profundidade do carrossel", 1.0f, 0.65f, 1.35f, "%.2fx", true, true };
