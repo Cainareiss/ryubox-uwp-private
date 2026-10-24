@@ -1,0 +1,14 @@
+{
+  "name": "uwp-imgui-frontend",
+  "version-string": "0.1.0",
+  "description": "Reusable controller-first ImGui frontend services for native UWP applications",
+  "license": "0BSD",
+  "dependencies": [
+    {
+      "name": "boost-asio",
+      "default-features": false
+    },
+    "fmt",
+    "rapidjson"
+  ]
+}

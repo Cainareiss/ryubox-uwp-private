@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>Ryujinx.Tests</AssemblyName>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/ARMeilleure/ARMeilleure.csproj" />
+    <ProjectReference Include="../../src/Ryujinx.Graphics.Gpu/Ryujinx.Graphics.Gpu.csproj" />
+  </ItemGroup>
+</Project>

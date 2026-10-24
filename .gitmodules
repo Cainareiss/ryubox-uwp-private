@@ -1,0 +1,6 @@
+[submodule "Ryujinx.Uwp.Native/shims/fmt-repo"]
+	path = Ryujinx.Uwp.Native/shims/fmt-repo
+	url = https://github.com/fmtlib/fmt.git
+[submodule "Ryujinx.Uwp.Native/shims/rapidjson-repo"]
+	path = Ryujinx.Uwp.Native/shims/rapidjson-repo
+	url = https://github.com/Tencent/rapidjson.git

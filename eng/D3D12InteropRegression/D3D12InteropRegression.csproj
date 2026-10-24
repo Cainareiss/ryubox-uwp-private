@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>D3D12InteropRegression</AssemblyName>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Ryujinx.Graphics.D3D12/Ryujinx.Graphics.D3D12.csproj" />
+  </ItemGroup>
+</Project>

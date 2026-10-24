@@ -1,0 +1,153 @@
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{C5A9F9F0-35A4-4F82-BE2D-7A0B9F3B1D4E}</ProjectGuid>
+    <ProjectTypeGuids>{A5A43C5B-DE2A-4C0C-9213-0A381AF9435A};{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}</ProjectTypeGuids>
+    <OutputType>AppContainerExe</OutputType>
+    <RootNamespace>Ryujinx.Uwp.App</RootNamespace>
+    <AssemblyName>Ryujinx.Uwp.App</AssemblyName>
+    <DefaultLanguage>pt-BR</DefaultLanguage>
+    <TargetPlatformIdentifier>UAP</TargetPlatformIdentifier>
+    <TargetPlatformVersion Condition=" '$(TargetPlatformVersion)' == '' ">10.0.26100.0</TargetPlatformVersion>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <MinimumVisualStudioVersion>14</MinimumVisualStudioVersion>
+    <EnableDotNetNativeCompatibleProfile>true</EnableDotNetNativeCompatibleProfile>
+    <FileAlignment>512</FileAlignment>
+    <ProjectPriFileName>resources.pri</ProjectPriFileName>
+    <AppxPackageSigningEnabled Condition=" '$(AppxPackageSigningEnabled)' == '' ">false</AppxPackageSigningEnabled>
+    <AppxAutoIncrementPackageRevision>false</AppxAutoIncrementPackageRevision>
+    <AppxBundle>Never</AppxBundle>
+    <AppxBundlePlatforms>x64</AppxBundlePlatforms>
+    <UapAppxPackageBuildMode>SideLoadOnly</UapAppxPackageBuildMode>
+    <GenerateAppInstallerFile>false</GenerateAppInstallerFile>
+    <LangVersion>7.3</LangVersion>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  <PackageCertificateKeyFile>Ryujinx.Uwp.App_TemporaryKey.pfx</PackageCertificateKeyFile><PackageCertificatePassword>1234</PackageCertificatePassword></PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <OutputPath>bin\x64\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE;NETFX_CORE;WINDOWS_UWP</DefineConstants>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseVSHostingProcess>false</UseVSHostingProcess>
+    <Prefer32Bit>false</Prefer32Bit>
+  <PackageCertificateKeyFile>Ryujinx.Uwp.App_TemporaryKey.pfx</PackageCertificateKeyFile><PackageCertificatePassword>1234</PackageCertificatePassword></PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <OutputPath>bin\x64\Release\</OutputPath>
+    <DefineConstants>TRACE;NETFX_CORE;WINDOWS_UWP</DefineConstants>
+    <Optimize>true</Optimize>
+    <DebugType>pdbonly</DebugType>
+    <PlatformTarget>x64</PlatformTarget>
+    <UseVSHostingProcess>false</UseVSHostingProcess>
+    <Prefer32Bit>false</Prefer32Bit>
+    <UseDotNetNativeToolchain>false</UseDotNetNativeToolchain>
+  <PackageCertificateKeyFile>Ryujinx.Uwp.App_TemporaryKey.pfx</PackageCertificateKeyFile><PackageCertificatePassword>1234</PackageCertificatePassword></PropertyGroup>
+
+  <PropertyGroup>
+    <NativeHostBinary Condition="'$(NativeHostBinary)' == ''">$(MSBuildProjectDirectory)\..\Ryujinx.Uwp.Native\bin\x64\$(Configuration)\Ryujinx.Uwp.Native.dll</NativeHostBinary>
+    <CoreHostBinary Condition="'$(CoreHostBinary)' == ''">$(MSBuildProjectDirectory)\..\Ryujinx.Uwp.CoreHost\bin\$(Configuration)\net10.0\win-x64\publish\Ryujinx.Uwp.CoreHost.dll</CoreHostBinary>
+    <CoreHostRuntimeDirectory Condition="'$(CoreHostRuntimeDirectory)' == ''">$([System.IO.Path]::GetDirectoryName('$(CoreHostBinary)'))</CoreHostRuntimeDirectory>
+    <SkiaSharpNativeBinary Condition="'$(SkiaSharpNativeBinary)' == ''">$(CoreHostRuntimeDirectory)\libSkiaSharp.dll</SkiaSharpNativeBinary>
+    <MesaStageDirectory Condition="'$(MesaStageDirectory)' == ''">$(MSBuildProjectDirectory)\..\..\artifacts\xbox\MesaDozenHeadlessXbox</MesaStageDirectory>
+    <IncludeMesaDozen Condition="'$(IncludeMesaDozen)' == ''">false</IncludeMesaDozen>
+    <SpirvCrossBinary Condition="'$(SpirvCrossBinary)' == ''">$(MSBuildProjectDirectory)\..\..\third_party\SPIRV-Cross\build-uwp-x64-msbuild\spirv-cross-c-shared.dll</SpirvCrossBinary>
+    <FfmpegStageDirectory Condition="'$(FfmpegStageDirectory)' == ''">$(MSBuildProjectDirectory)\..\..\third_party\ffmpeg-5.1.6-win64-lgpl-shared\package\ffmpeg-n5.1.6-16-g6e63e49496-win64-lgpl-shared-5.1\bin</FfmpegStageDirectory>
+  <PackageCertificateKeyFile>Ryujinx.Uwp.App_TemporaryKey.pfx</PackageCertificateKeyFile><PackageCertificatePassword>1234</PackageCertificatePassword></PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="App.xaml.cs">
+      <DependentUpon>App.xaml</DependentUpon>
+    </Compile>
+    <Compile Include="MainPage.xaml.cs">
+      <DependentUpon>MainPage.xaml</DependentUpon>
+    </Compile>
+    <Compile Include="UwpGraphicsHost.cs" />
+    <Compile Include="UwpCoreSession.cs" />
+    <Compile Include="UwpInputHost.cs" />
+    <Compile Include="UwpFrontendLog.cs" />
+    <Compile Include="StorageFileHandleAccess.cs" />
+    <Compile Include="UwpUiSoundPlayer.cs" />
+    <Compile Include="UwpBootScreen.cs" />
+    <Compile Include="RyuboxSettingsBridge.cs" />
+    <Compile Include="UwpImGuiFrontendCoordinator.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+  </ItemGroup>
+
+  <Target Name="ValidateSpirvCrossBinaryForPackage" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(SpirvCrossBinary)')"
+           Text="Required runtime dependency missing: spirv-cross-c-shared.dll. Set SpirvCrossBinary to the UWP-compatible DLL before building the Xbox/MSIX package." />
+    <Error Condition="!Exists('$(SkiaSharpNativeBinary)')"
+           Text="Required CoreHost runtime dependency missing: libSkiaSharp.dll. Publish Ryujinx.Uwp.CoreHost for win-x64 before building the Xbox/MSIX package." />
+  </Target>
+
+  <ItemGroup>
+    <ApplicationDefinition Include="App.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </ApplicationDefinition>
+    <Page Include="MainPage.xaml">
+      <Generator>MSBuild:Compile</Generator>
+      <SubType>Designer</SubType>
+    </Page>
+    <AppxManifest Include="Package.appxmanifest">
+      <SubType>Designer</SubType>
+    </AppxManifest>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\*.png" />
+    <Content Include="Assets\CoverArt\*.jpg" />
+    <Content Include="Assets\Sfx\*.wav" />
+    <Content Include="Assets\Music\*.mp3" />
+    <Content Include="Assets\CoverArt\index.tsv" />
+    <Content Include="icons\*.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="..\UWP-ImGuiFrontend\assets\fonts\Lato-Medium.ttf">
+      <Link>resources\fonts\Lato-Medium.ttf</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(NativeHostBinary)" Condition="Exists('$(NativeHostBinary)')">
+      <Link>Ryujinx.Uwp.Native.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(CoreHostBinary)" Condition="Exists('$(CoreHostBinary)')">
+      <Link>Ryujinx.Uwp.CoreHost.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(SkiaSharpNativeBinary)" Condition="Exists('$(SkiaSharpNativeBinary)')">
+      <Link>libSkiaSharp.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(SpirvCrossBinary)" Condition="Exists('$(SpirvCrossBinary)')">
+      <Link>spirv-cross-c-shared.dll</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(FfmpegStageDirectory)\*.dll" Condition="Exists('$(FfmpegStageDirectory)')">
+      <Link>%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(MesaStageDirectory)\*.dll" Condition="'$(IncludeMesaDozen)' == 'true' and Exists('$(MesaStageDirectory)')">
+      <Link>%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="$(MesaStageDirectory)\*.json" Condition="'$(IncludeMesaDozen)' == 'true' and Exists('$(MesaStageDirectory)')">
+      <Link>%(Filename)%(Extension)</Link>
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NETCore.UniversalWindowsPlatform" Version="6.2.14" />
+    <PackageReference Include="SharpCompress" Version="0.50.0" />
+  </ItemGroup>
+
+  <PropertyGroup Condition=" '$(VisualStudioVersion)' == '' or '$(VisualStudioVersion)' &lt; '15.0' ">
+    <VisualStudioVersion>17.0</VisualStudioVersion>
+  <PackageCertificateKeyFile>Ryujinx.Uwp.App_TemporaryKey.pfx</PackageCertificateKeyFile><PackageCertificatePassword>1234</PackageCertificatePassword></PropertyGroup>
+  <Import Project="$(MSBuildExtensionsPath)\Microsoft\WindowsXaml\v$(VisualStudioVersion)\Microsoft.Windows.UI.Xaml.CSharp.targets" />
+</Project>
+
